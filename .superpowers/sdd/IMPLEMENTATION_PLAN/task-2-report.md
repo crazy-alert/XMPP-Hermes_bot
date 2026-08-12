@@ -68,3 +68,43 @@ without pytest cache provider was clean:
 - Git's normal sandbox could not create `.git/index.lock`; the scoped GREEN
   commit was created with approved escalation. Only the two Task 2 files were
   staged.
+
+## Fix round 1: fail-closed review findings
+
+Regression RED commit: `0f4b352ea4df2c7a5220587e5184a693ed8ffd48`
+
+RED command:
+
+```text
+.\\.venv\\Scripts\\python.exe -m pytest -q tests/test_policy.py -p no:cacheprovider
+```
+
+RED output:
+
+```text
+12 failed, 31 passed in 1.41s
+```
+
+The failures reproduced permissive fallback domains/control characters, an
+unvalidated MUC room, an unvalidated bot JID in reply routing, empty/string
+reply caches, and invalid direct-message session shape.
+
+Fix commit: `ec5c71aa196b33aebbcd9de06185d0e19eca8971`
+
+Focused GREEN command/output:
+
+```text
+.\\.venv\\Scripts\\python.exe -m pytest -q tests/test_policy.py -p no:cacheprovider
+43 passed in 0.41s
+```
+
+Full GREEN command/output:
+
+```text
+.\\.venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider
+46 passed in 0.54s
+```
+
+The policy now validates every routing/session JID before activation, rejects
+control characters and malformed domain labels in the fallback parser, and
+only accepts nonempty reply IDs from a non-string collection.
