@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 import re
+import unicodedata
 
 from .models import InboundXmppMessage
 
@@ -38,7 +39,7 @@ def normalize_bare_jid(value: str) -> str:
         bare = JID(candidate).bare
 
     bare = bare.strip()
-    if not _FALLBACK_BARE_JID.fullmatch(bare):
+    if not _is_valid_bare_jid(bare):
         raise ValueError("JID must contain a localpart and domain")
     return bare.casefold()
 
@@ -72,8 +73,10 @@ def route_group(
     """Route an authorized MUC mention or reply to one of the bot's messages."""
     if not isinstance(message, InboundXmppMessage) or message.is_group is not True:
         return None
+    room = _normalized_or_none(message.chat_jid)
+    bot_bare = _normalized_or_none(bot_jid)
     sender = _normalized_or_none(message.sender_jid)
-    if sender is None or sender not in _normalize_allowed(allowed_users):
+    if room is None or bot_bare is None or sender is None or sender not in _normalize_allowed(allowed_users):
         return None
     if not isinstance(message.sender_nick, str) or not isinstance(bot_nick, str):
         return None
@@ -83,12 +86,9 @@ def route_group(
     body = _clean_body(message.body)
     if not body:
         return None
-    if isinstance(message.reply_to_id, str) and message.reply_to_id in bot_message_ids:
+    if _is_cached_reply(message.reply_to_id, bot_message_ids):
         return RoutedMessage(message, body)
 
-    bot_bare = _normalized_or_none(bot_jid)
-    if bot_bare is None:
-        return None
     mentioned = _strip_leading_mention(body, bot_bare, bot_nick)
     return RoutedMessage(message, mentioned) if mentioned else None
 
@@ -98,10 +98,12 @@ def session_key(message: InboundXmppMessage) -> str:
     if not isinstance(message, InboundXmppMessage) or type(message.is_group) is not bool:
         raise ValueError("invalid inbound XMPP event")
     sender = normalize_bare_jid(message.sender_jid)
+    chat = normalize_bare_jid(message.chat_jid)
     if not message.is_group:
+        if sender == chat:
+            raise ValueError("direct event must not be a self-message")
         return f"xmpp:dm:{sender}"
-    room = normalize_bare_jid(message.chat_jid)
-    return f"xmpp:muc:{room}:{sender}"
+    return f"xmpp:muc:{chat}:{sender}"
 
 
 def _normalize_allowed(allowed_users: Iterable[str]) -> frozenset[str]:
@@ -120,6 +122,34 @@ def _normalized_or_none(value: object) -> str | None:
 
 def _clean_body(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _is_valid_bare_jid(bare: str) -> bool:
+    if not _FALLBACK_BARE_JID.fullmatch(bare) or any(_is_control(char) for char in bare):
+        return False
+    localpart, domain = bare.split("@", 1)
+    if not localpart or not domain:
+        return False
+    return all(
+        label
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(char == "-" or char.isalnum() for char in label)
+        for label in domain.split(".")
+    )
+
+
+def _is_control(char: str) -> bool:
+    return unicodedata.category(char) == "Cc"
+
+
+def _is_cached_reply(reply_to_id: object, bot_message_ids: object) -> bool:
+    if not isinstance(reply_to_id, str) or not reply_to_id or isinstance(bot_message_ids, (str, bytes)):
+        return False
+    try:
+        return reply_to_id in bot_message_ids  # type: ignore[operator]
+    except TypeError:
+        return False
 
 
 def _strip_leading_mention(body: str, bot_bare: str, bot_nick: str) -> str | None:
