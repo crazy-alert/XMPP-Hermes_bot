@@ -87,7 +87,7 @@ def test_group_route_accepts_leading_case_insensitive_mentions_and_removes_marke
 @pytest.mark.parametrize(
     "body",
     [
-        "обычный текст", 
+        "обычный текст",
         "shermes вопрос",
         "Hermesговорит вопрос",
         "спроси Hermes, вопрос",
