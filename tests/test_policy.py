@@ -39,7 +39,14 @@ def test_normalize_bare_jid_removes_resource_and_casefolds(value, expected):
     assert normalize_bare_jid(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "  ", "no-at-sign", "@aversa.run", "admin@", "a@b@c", "a b@c"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "", "  ", "no-at-sign", "@aversa.run", "admin@", "a@b@c", "a b@c",
+        "a@.", "a@.aversa.run", "a@aversa.run.", "a@aversa..run",
+        "a@aversa\x00.run", "a@aversa\x1f.run", "a\x7f@aversa.run",
+    ],
+)
 def test_normalize_bare_jid_rejects_malformed_or_empty_values(value):
     with pytest.raises(ValueError):
         normalize_bare_jid(value)
@@ -116,11 +123,34 @@ def test_group_route_checks_allowlist_before_activation_and_rejects_own_nick(mes
     assert route_group(message, ALLOWED, "hermes@aversa.run", "Hermes", bot_message_ids) is None
 
 
+@pytest.mark.parametrize(
+    "message, bot_jid, bot_message_ids",
+    [
+        (InboundXmppMessage("m", "not-a-room", "admin@aversa.run", "Admin", "reply", True, "bot-42"), "hermes@aversa.run", {"bot-42"}),
+        (group(body="reply", reply="bot-42"), "not-a-jid", {"bot-42"}),
+        (group(body="reply", reply=""), "hermes@aversa.run", {""}),
+        (group(body="reply", reply="bot-42"), "hermes@aversa.run", "bot-42"),
+    ],
+)
+def test_group_route_rejects_invalid_room_bot_or_reply_id_cache_before_reply_activation(message, bot_jid, bot_message_ids):
+    assert route_group(message, ALLOWED, bot_jid, "Hermes", bot_message_ids) is None
+
+
 def test_session_key_uses_normalized_bare_jids_for_direct_and_group_messages():
     assert session_key(direct(sender="Admin@Aversa.Run/resource")) == "xmpp:dm:admin@aversa.run"
     assert session_key(group(sender="Admin@Aversa.Run/resource").__class__(
         "m2", "Room@Conference.Aversa.Run/desktop", "Admin@Aversa.Run/resource", "Admin", "body", True, None
     )) == "xmpp:muc:room@conference.aversa.run:admin@aversa.run"
+
+
+def test_session_key_rejects_direct_event_with_malformed_chat_jid():
+    with pytest.raises(ValueError):
+        session_key(direct(chat="not-a-chat"))
+
+
+def test_session_key_rejects_direct_event_addressed_from_its_own_chat_jid():
+    with pytest.raises(ValueError):
+        session_key(direct(sender="hermes@aversa.run", chat="hermes@aversa.run"))
 
 
 @pytest.mark.parametrize(
