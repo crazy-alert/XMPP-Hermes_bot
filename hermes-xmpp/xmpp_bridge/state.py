@@ -21,19 +21,23 @@ class RoomState:
 
     def load(self) -> frozenset[str]:
         """Load rooms, quarantining malformed files without losing known state."""
-        if not self.path.exists():
-            return self._rooms if self._has_valid_state else frozenset()
+        while True:
+            if not self.path.exists():
+                return self._rooms if self._has_valid_state else frozenset()
 
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-            rooms = self._parse_payload(payload)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
-            self._quarantine_corrupt_file()
-            return self._rooms if self._has_valid_state else frozenset()
+            contents = self.path.read_bytes()
+            try:
+                text = contents.decode("utf-8")
+                payload = json.loads(text)
+                rooms = self._parse_payload(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+                if not self._quarantine_corrupt_file(contents):
+                    continue
+                return self._rooms if self._has_valid_state else frozenset()
 
-        self._rooms = rooms
-        self._has_valid_state = True
-        return rooms
+            self._rooms = rooms
+            self._has_valid_state = True
+            return rooms
 
     def add(self, room_jid: str) -> bool:
         """Persist a room, returning whether the state changed."""
@@ -97,8 +101,6 @@ class RoomState:
                 os.fsync(temporary.fileno())
             os.replace(temp_name, self.path)
             temp_name = None
-            if os.name != "nt":
-                os.chmod(self.path, 0o600)
         finally:
             if temp_name is not None:
                 try:
@@ -106,13 +108,53 @@ class RoomState:
                 except FileNotFoundError:
                     pass
 
-    def _quarantine_corrupt_file(self) -> None:
+    def _quarantine_corrupt_file(self, expected_contents: bytes) -> bool:
         if not self.path.exists():
-            return
+            return True
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        candidate = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
-        suffix = 1
-        while candidate.exists():
-            candidate = self.path.with_name(f"{self.path.name}.corrupt-{stamp}-{suffix}")
-            suffix += 1
-        os.replace(self.path, candidate)
+        suffix = 0
+        while True:
+            discriminator = "" if suffix == 0 else f"-{suffix}"
+            candidate = self.path.with_name(f"{self.path.name}.corrupt-{stamp}{discriminator}")
+            try:
+                os.link(self.path, candidate)
+            except FileExistsError:
+                suffix += 1
+                continue
+            break
+
+        if candidate.read_bytes() != expected_contents:
+            os.unlink(candidate)
+            return False
+
+        staging_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.quarantine-",
+                suffix=".tmp",
+                delete=False,
+            ) as staging:
+                staging_name = staging.name
+            try:
+                os.replace(self.path, staging_name)
+            except OSError:
+                os.unlink(candidate)
+                raise
+
+            if os.path.samefile(staging_name, candidate):
+                os.unlink(staging_name)
+            else:
+                try:
+                    os.link(staging_name, self.path)
+                except FileExistsError:
+                    pass
+                os.unlink(staging_name)
+            staging_name = None
+        finally:
+            if staging_name is not None:
+                try:
+                    os.unlink(staging_name)
+                except FileNotFoundError:
+                    pass
+        return True

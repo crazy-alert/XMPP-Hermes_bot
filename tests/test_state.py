@@ -111,6 +111,49 @@ def test_failed_atomic_replace_keeps_original_file_and_in_memory_state(tmp_path,
     assert list(path.parent.glob("*.tmp")) == []
 
 
+def test_write_does_not_report_failure_after_successful_replace(tmp_path, monkeypatch):
+    path = tmp_path / "rooms.json"
+    state = RoomState(path)
+    assert state.add("room@conference.aversa.run") is True
+
+    replaced = False
+    real_replace = os.replace
+
+    def track_replace(source, destination):
+        nonlocal replaced
+        real_replace(source, destination)
+        replaced = True
+
+    def fail_chmod(*args):
+        if replaced:
+            raise OSError("must not chmod after replace")
+
+    monkeypatch.setattr("xmpp_bridge.state.os.replace", track_replace)
+    monkeypatch.setattr("xmpp_bridge.state.os.chmod", fail_chmod)
+
+    assert state.add("other@conference.aversa.run") is True
+    assert state.load() == frozenset({"room@conference.aversa.run", "other@conference.aversa.run"})
+
+
+def test_transient_read_error_preserves_file_and_valid_in_memory_state(tmp_path, monkeypatch):
+    path = tmp_path / "rooms.json"
+    state = RoomState(path)
+    assert state.add("room@conference.aversa.run") is True
+    before = path.read_bytes()
+    real_read_bytes = Path.read_bytes
+
+    def fail_read(self, *args, **kwargs):
+        raise OSError("temporary I/O failure")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read)
+    with pytest.raises(OSError, match="temporary I/O failure"):
+        state.load()
+
+    assert real_read_bytes(path) == before
+    assert state._rooms == frozenset({"room@conference.aversa.run"})
+    assert list(tmp_path.glob("rooms.json.corrupt-*")) == []
+
+
 def test_corrupt_json_is_quarantined_and_empty_when_no_valid_state(tmp_path):
     path = tmp_path / "rooms.json"
     path.write_text("{not json", encoding="utf-8")
@@ -132,6 +175,93 @@ def test_corrupt_json_does_not_replace_existing_quarantine(tmp_path):
     assert RoomState(path).load() == frozenset()
     assert existing.read_text(encoding="utf-8") == "older evidence"
     assert len(list(tmp_path.glob("rooms.json.corrupt-*"))) == 2
+
+
+def test_corrupt_json_retries_quarantine_name_after_racing_reservation(tmp_path, monkeypatch):
+    path = tmp_path / "rooms.json"
+    path.write_text("{not json", encoding="utf-8")
+    real_link = os.link
+    calls = 0
+
+    def race_link(source, candidate):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            Path(candidate).write_text("racer evidence", encoding="utf-8")
+            raise FileExistsError(candidate)
+        return real_link(source, candidate)
+
+    monkeypatch.setattr("xmpp_bridge.state.os.link", race_link)
+
+    assert RoomState(path).load() == frozenset()
+    quarantined = sorted(tmp_path.glob("rooms.json.corrupt-*"))
+    assert [item.read_text(encoding="utf-8") for item in quarantined] == ["racer evidence", "{not json"]
+    assert not path.exists()
+
+
+def test_quarantine_does_not_delete_state_replaced_during_move(tmp_path, monkeypatch):
+    path = tmp_path / "rooms.json"
+    path.write_text("{not json", encoding="utf-8")
+    replacement = '{"version":1,"rooms":["new@conference.aversa.run"]}\n'
+    real_replace = os.replace
+    raced = False
+
+    def race_replace(source, destination):
+        nonlocal raced
+        if Path(source) == path and not raced:
+            raced = True
+            concurrent = tmp_path / "concurrent.json"
+            concurrent.write_text(replacement, encoding="utf-8")
+            real_replace(concurrent, path)
+        real_replace(source, destination)
+
+    monkeypatch.setattr("xmpp_bridge.state.os.replace", race_replace)
+
+    assert RoomState(path).load() == frozenset()
+    quarantined = list(tmp_path.glob("rooms.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text(encoding="utf-8") == "{not json"
+    assert path.read_text(encoding="utf-8") == replacement
+
+
+def test_quarantine_reloads_state_replaced_before_link(tmp_path, monkeypatch):
+    path = tmp_path / "rooms.json"
+    path.write_text("{not json", encoding="utf-8")
+    replacement = '{"version":1,"rooms":["new@conference.aversa.run"]}\n'
+    real_link = os.link
+    real_replace = os.replace
+    raced = False
+
+    def race_link(source, destination):
+        nonlocal raced
+        if Path(source) == path and not raced:
+            raced = True
+            concurrent = tmp_path / "concurrent.json"
+            concurrent.write_text(replacement, encoding="utf-8")
+            real_replace(concurrent, path)
+        real_link(source, destination)
+
+    monkeypatch.setattr("xmpp_bridge.state.os.link", race_link)
+
+    assert RoomState(path).load() == frozenset({"new@conference.aversa.run"})
+    assert path.read_text(encoding="utf-8") == replacement
+    assert list(tmp_path.glob("rooms.json.corrupt-*")) == []
+
+
+def test_failed_quarantine_move_removes_empty_reservation(tmp_path, monkeypatch):
+    path = tmp_path / "rooms.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    def fail_replace(source, destination):
+        raise OSError("quarantine move failed")
+
+    monkeypatch.setattr("xmpp_bridge.state.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="quarantine move failed"):
+        RoomState(path).load()
+
+    assert path.read_text(encoding="utf-8") == "{not json"
+    assert list(tmp_path.glob("rooms.json.corrupt-*")) == []
 
 
 def test_failed_load_preserves_previously_valid_in_memory_rooms(tmp_path):
