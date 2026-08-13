@@ -11,7 +11,9 @@
 ## Global Constraints
 
 - Публичный GitHub repository: `https://github.com/crazy-alert/XMPP-Hermes_bot`.
-- Ни один отслеживаемый текстовый файл не содержит `aversa.run`, `193.233.250.68`, `109.107.189.155`, частные JID или частный model endpoint.
+- Ни один отслеживаемый текстовый файл не содержит известных частных доменов,
+  IP-адресов, JID или model endpoint из исходного deployment brief. Тест хранит
+  denylist вне публикуемых fixtures и сообщает только путь совпавшего файла.
 - Примеры идентификаторов используют только `example.com`/`example.net`; секреты представлены пустыми значениями или инструкциями, но не fake secret-looking строками.
 - Bootstrap по умолчанию не исполняет изменяемую вершину `main`: ref/commit задаётся явно, фактический checkout commit проверяется до запуска внутреннего installer.
 - `/etc/hermes/hermes.env`, Hermes config/memory и XMPP room state сохраняются при повторной установке.
@@ -80,7 +82,7 @@ git commit -m "refactor: обезличить публичную конфигу�
 
 **Interfaces:**
 - Consumes: repository URL `https://github.com/crazy-alert/XMPP-Hermes_bot.git`, exact release ref/commit, `deploy/install-on-ubuntu.sh`.
-- Produces: `installer.sh [--ref <40-hex-commit-or-tag>]`, temporary staging cleanup, delegated transactional install.
+- Produces: `installer.sh [--ref <40-hex-commit-or-tag>]`, temporary staging cleanup, delegated transactional install и атомарную интерактивную конфигурацию.
 
 - [ ] **Step 1: Write failing behavioral bootstrap tests**
 
@@ -93,6 +95,13 @@ Harness substitutes local fake `git`, `apt-get` and inner installer, then assert
 - mismatch/tampered checkout fails without inner installer;
 - staging is removed on success and failure;
 - arguments are quoted and no secret values are accepted or logged.
+- мастер спрашивает XMPP host, port, TLS mode, bot JID/resource/nick, скрытый
+  XMPP password и непустой список доверенных bare JID;
+- невалидные host/JID/port/TLS и прерванный ввод не заменяют существующий env;
+- новый env записывается через temporary file, mode `0600`, atomic rename, а
+  секреты не появляются в argv/stdout/stderr;
+- provider/model/custom endpoint задаются опционально; при пропуске README ведёт
+  пользователя через `hermes model`, а service остаётся остановленным.
 
 Run: `.venv/Scripts/python.exe -m pytest -q tests/test_deploy_assets.py -k bootstrap`
 
@@ -100,7 +109,7 @@ Expected: FAIL because `installer.sh` is absent.
 
 - [ ] **Step 2: Implement minimal bootstrap**
 
-Use `set -Eeuo pipefail`, unconditional root/Ubuntu checks, `apt-get install --no-install-recommends ca-certificates git`, `mktemp -d`, cleanup trap, `git init` + remote/fetch exact ref (or depth-one clone where tag resolves immutably), verify a 40-hex commit via `git rev-parse`, then execute `bash "$stage/deploy/install-on-ubuntu.sh"`. Do not collect XMPP/provider secrets in bootstrap.
+Use `set -Eeuo pipefail`, unconditional root/Ubuntu checks, `apt-get install --no-install-recommends ca-certificates git`, `mktemp -d`, cleanup trap, `git init` + remote/fetch exact ref (or depth-one clone where tag resolves immutably), verify a 40-hex commit via `git rev-parse`, then execute `bash "$stage/deploy/install-on-ubuntu.sh"`. После успешной транзакционной установки собрать XMPP/provider values интерактивно; секреты читать `read -rsp`, очищать trap-ом и атомарно записывать только в `/etc/hermes/hermes.env` с mode `0600`. Не запускать сервис автоматически.
 
 - [ ] **Step 3: Enforce LF and shell syntax**
 
@@ -175,7 +184,7 @@ git commit -m "docs: описать установку и работу XMPP Herm
 .venv/Scripts/python.exe -m pytest -q
 git diff --check
 git status --short
-git grep -n -I -E 'aversa\.run|193\.233\.250\.68|109\.107\.189\.155'
+python -m pytest -q tests/test_public_release.py -k private_identifiers
 ```
 
 Expected: tests PASS, diff clean, grep no matches, status contains no unintended files.
