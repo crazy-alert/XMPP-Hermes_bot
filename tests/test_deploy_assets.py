@@ -120,12 +120,19 @@ cp "$HERMES_TEST_UPSTREAM" "$out"
         logger
         + """
 case "$1" in
-  enable) [ "${2:-}" != --now ] || [ "${3:-}" != docker ] || touch "$HERMES_TEST_STATE/docker-daemon"; touch "$HERMES_TEST_STATE/enabled" ;;
-  is-active) [ -e "$HERMES_TEST_STATE/active" ] ;;
-  is-enabled) [ -e "$HERMES_TEST_STATE/enabled" ] ;;
+  enable)
+    if [ "${2:-}" = --now ] && [ "${3:-}" = docker ]; then touch "$HERMES_TEST_STATE/docker-daemon"; exit 0; fi
+    [ "${HERMES_TEST_FAIL_ENABLE_NOW:-0}" != 1 ] || exit 1
+    touch "$HERMES_TEST_STATE/enabled"
+    [ "${2:-}" != --now ] || [ "${HERMES_TEST_FALSE_ENABLE:-0}" = 1 ] || touch "$HERMES_TEST_STATE/active"
+    ;;
+  is-active) [ "${HERMES_TEST_FALSE_ACTIVE:-0}" != 1 ] && [ -e "$HERMES_TEST_STATE/active" ] ;;
+  is-enabled) [ "${HERMES_TEST_FALSE_ENABLE:-0}" != 1 ] && [ -e "$HERMES_TEST_STATE/enabled" ] ;;
   stop) [ "${HERMES_TEST_FAIL_STOP:-0}" != 1 ] && rm -f "$HERMES_TEST_STATE/active" ;;
   disable) rm -f "$HERMES_TEST_STATE/enabled" ;;
   start) touch "$HERMES_TEST_STATE/active" ;;
+  cat) [ "${HERMES_TEST_MISSING_UNIT:-0}" != 1 ] ;;
+  status|journalctl) : ;;
   daemon-reload) : ;;
   *) exit 2 ;;
 esac
@@ -149,7 +156,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 mkdir -p "$install_dir/venv/bin" "$HERMES_HOME/bin"
-printf '#!/bin/sh\\nexit 0\\n' >"$install_dir/venv/bin/hermes"
+printf '#!/bin/sh\\n[ "$1" != doctor ] || [ "${HERMES_TEST_FAIL_DOCTOR:-0}" != 1 ]\\n' >"$install_dir/venv/bin/hermes"
 printf '#!/bin/sh\\nexit 0\\n' >"$install_dir/venv/bin/python"
 printf '#!/bin/sh\\nexit 0\\n' >"$HERMES_HOME/bin/uv"
 chmod 700 "$HERMES_HOME/bin/uv" "$install_dir/venv/bin/hermes" "$install_dir/venv/bin/python"
@@ -194,7 +201,7 @@ def generated_installer(
         assert old in source, old
         source = source.replace(old, new, 1)
     if interactive_stdin:
-        source = source.replace('if [ ! -t 0 ]; then', 'if false; then', 1)
+        source = source.replace('if [ ! -t 0 ]; then', 'if false; then')
     if inject_after:
         assert inject_after in source
         sentinel = bash_path(tmp_path / "injection-reached")
@@ -407,6 +414,60 @@ def test_missing_docker_fails_when_installation_does_not_make_it_ready(tmp_path:
 
     assert result.returncode != 0
     assert not (fake_root / "etc/hermes/hermes.env").exists()
+
+
+@pytest.mark.parametrize("answer", ["yes\n", "ДА\n", "дА\n"])
+def test_service_starts_only_after_doctor_and_explicit_consent(tmp_path: Path, answer: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    script = generated_installer(tmp_path, fake_root, interactive_stdin=True)
+
+    result = subprocess.run(
+        [find_bash(), str(script)], cwd=ROOT, env=env, input=answer.encode("utf-8"),
+        capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    state = tmp_path / "state"
+    assert (state / "active").exists() and (state / "enabled").exists()
+    log = (tmp_path / "commands.log").read_text()
+    assert "runuser -u hermes -- /" in log
+    assert "systemctl cat hermes-gateway" in log
+    assert "systemctl enable --now hermes-gateway" in log
+    assert log.index("systemctl cat hermes-gateway") < log.index("systemctl enable --now hermes-gateway")
+
+
+@pytest.mark.parametrize("answer", ["no\n", "\n", ""])
+def test_service_remains_stopped_and_disabled_without_consent(tmp_path: Path, answer: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    script = generated_installer(tmp_path, fake_root, interactive_stdin=True)
+
+    result = subprocess.run(
+        [find_bash(), str(script)], cwd=ROOT, env=env, input=answer,
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = tmp_path / "state"
+    assert not (state / "active").exists() and not (state / "enabled").exists()
+
+
+@pytest.mark.parametrize("failure", ["HERMES_TEST_FAIL_DOCTOR", "HERMES_TEST_MISSING_UNIT", "HERMES_TEST_FAIL_ENABLE_NOW", "HERMES_TEST_FALSE_ACTIVE", "HERMES_TEST_FALSE_ENABLE"])
+def test_service_start_failures_fail_without_exposing_env(tmp_path: Path, failure: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    env[failure] = "1"
+    script = generated_installer(tmp_path, fake_root, interactive_stdin=True)
+
+    result = subprocess.run(
+        [find_bash(), str(script)], cwd=ROOT, env=env, input="y\n",
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode != 0
+    assert "XMPP_PASSWORD" not in result.stdout
+    assert "XMPP_PASSWORD" not in result.stderr
+    log = (tmp_path / "commands.log").read_text()
+    if failure in {"HERMES_TEST_FAIL_ENABLE_NOW", "HERMES_TEST_FALSE_ACTIVE", "HERMES_TEST_FALSE_ENABLE"}:
+        assert "systemctl status --no-pager hermes-gateway" in log
 
 
 def test_rerun_skips_runtime_installer_and_preserves_env(tmp_path: Path) -> None:

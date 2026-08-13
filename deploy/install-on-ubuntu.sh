@@ -80,6 +80,24 @@ confirm_docker_installation() {
     esac
 }
 
+confirm_service_start() {
+    if [ ! -t 0 ]; then
+        return 1
+    fi
+    printf '%s' 'Enable automatic start and start Hermes now? [y/N] '
+    IFS= read -r answer || return 1
+    answer=${answer%$'\r'}
+    case "$answer" in
+        [Yy]|[Yy][Ee][Ss]|$'\320\264\320\260'|$'\320\264\320\220'|$'\320\224\320\260'|$'\320\224\320\220') return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+service_diagnostics() {
+    systemctl status --no-pager hermes-gateway >&2 || true
+    journalctl -u hermes-gateway --no-pager -n 50 >&2 || true
+}
+
 if ! docker_ready; then
     if ! confirm_docker_installation; then
         printf '%s\n' 'Hermes installation cancelled: Docker Engine is not ready.' >&2
@@ -298,7 +316,27 @@ chmod 0644 "$UNIT_FILE"
 systemctl daemon-reload
 if [ "$WAS_ENABLED" = 1 ]; then systemctl disable hermes-gateway; fi
 
+if ! systemctl cat hermes-gateway >/dev/null; then
+    printf '%s\n' 'Error: Hermes service unit is not loaded.' >&2
+    exit 1
+fi
+if ! runuser -u hermes -- "$HERMES_BIN_DISK" doctor >/dev/null; then
+    printf '%s\n' 'Error: Hermes diagnostic check failed.' >&2
+    exit 1
+fi
+
 runuser -u hermes -- rm -rf -- "$PLUGIN_BACKUP"
 rm -f -- "$UNIT_BACKUP"
 TRANSACTION=0
-printf 'Установка Hermes %s завершена. Служба остановлена и отключена.\n' "$HERMES_RELEASE"
+if confirm_service_start; then
+    if ! systemctl enable --now hermes-gateway \
+        || ! systemctl is-enabled --quiet hermes-gateway \
+        || ! systemctl is-active --quiet hermes-gateway; then
+        printf '%s\n' 'Error: Hermes service did not start successfully.' >&2
+        service_diagnostics
+        exit 1
+    fi
+    printf 'Hermes %s installed and running.\n' "$HERMES_RELEASE"
+else
+    printf 'Hermes %s installed. Service remains stopped and disabled.\n' "$HERMES_RELEASE"
+fi
