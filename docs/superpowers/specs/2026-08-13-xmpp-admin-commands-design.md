@@ -33,7 +33,16 @@ XMPP-сервера или клиентской истории. README явно 
   HTTPS, кроме явно локальных loopback endpoints.
 - `/token set <token>` сохраняет provider token и отвечает только фактом успеха и
   короткой маской.
-- `/trust list|add|remove <bare-jid>` управляет trusted JID.
+- `/trust list` показывает trusted JID. Подтверждаемый toggle запускается, когда
+  owner присылает в DM сообщение, целиком состоящее из одного валидного bare JID
+  (например, `user@example.com`), без префикса `/trust`. Если нормализованного JID нет, бот спрашивает о
+  добавлении; если он уже есть — об удалении. Тот же owner должен в DM ответить
+  `да`, `yes` или `y` (регистр и окружающие пробелы не важны) в течение 60 секунд.
+  Любой иной ответ отменяет операцию; timeout/replay ничего не меняют; новый
+  pending-запрос owner отменяет предыдущий. В момент подтверждения config version
+  и исходное membership проверяются повторно: если другой owner уже изменил
+  список, toggle отменяется и требуется повторить команду.
+  Строка, где JID является лишь частью предложения, остаётся обычным запросом к AI.
 - `/owner list|add|remove <bare-jid>` управляет owners с invariant последнего owner.
 - `/doctor` запускает ограниченную безопасную проверку конфигурации.
 - `/restart` просит управляющий процесс применить новую конфигурацию; команда не
@@ -81,7 +90,8 @@ reboot — этот остаточный риск явно документир�
 
 Тесты покрывают регистр `ping`, bypass модели, owner/trusted/MUC matrix, последнего
 owner, JID/URL validation, atomic recovery, concurrent mutations, corrupted state,
-token redaction в ответах/logs/errors и reload/restart contract. Acceptance
+token redaction в ответах/logs/errors, trust-add подтверждение (`да`/`yes`/`y`,
+case/whitespace, timeout/cancel/replay/same-owner) и reload/restart contract. Acceptance
 проверяет команды из двух owners, trusted и denied JID, после чего перезапускает
 service и подтверждает сохранение конфигурации. Для host reboot тестируются
 same-owner DM confirmation, timeout, replay, cancel, concurrent request и cooldown;

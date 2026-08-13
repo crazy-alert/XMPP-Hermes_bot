@@ -47,7 +47,7 @@
 - Consumes: `InboundXmppMessage`, `AdminState`, sanitized status/doctor callbacks.
 - Produces: `CommandResult(handled, reply, control_event)` with control events `ReloadConfig`, `RestartGateway`, `RequestHostReboot`.
 
-- [ ] Write RED matrix for `ping`, help/status/config, model/endpoint/token, trust/owner operations, doctor/restart, unknown commands, owner/trusted/denied, DM/MUC, last-owner and redaction.
+- [ ] Write RED matrix for `ping`, help/status/config, model/endpoint/token, trust/owner operations, doctor/restart, unknown commands, owner/trusted/denied, DM/MUC, last-owner and redaction. An owner-only DM whose entire trimmed body is one valid bare JID (no `/trust` prefix) chooses add/remove from the current immutable config version, shows the normalized JID, and must remain unchanged until the same owner sends `да`, `yes`, or `y` case-insensitively within 60 seconds. A sentence merely containing a JID must continue to Hermes. Cover whitespace, other-answer cancellation, timeout, replay, newer request replacement and concurrent membership/version change cancelling the stale toggle.
 - [ ] Run focused; expected import failure.
 - [ ] Implement strict shlex-free parser (command + remainder), case-insensitive command names, bounded lengths, exact validation and no secret echo/logging.
 - [ ] Run focused plus policy tests; expected PASS.
