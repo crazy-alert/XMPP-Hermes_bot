@@ -3,17 +3,14 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_ROOT_FILES = frozenset(
-    {".gitattributes", ".gitignore", "AGENTS.md", "DESIGN.md", "IMPLEMENTATION_PLAN.md", "README.md"}
-)
-PUBLIC_DIRECTORIES = ("deploy/", "docs/", "hermes-xmpp/", "tests/")
-DEVELOPMENT_DIRECTORIES = (".superpowers/",)
+BUILDER = ROOT / "scripts/build-public-release.py"
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(r"(?im)^\s*(?:export\s+)?[A-Z][A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET|API_KEY)[A-Z0-9_]*\s*=\s*[^\s#]+"),
@@ -34,19 +31,11 @@ def tracked_paths() -> list[Path]:
     return [ROOT / raw.decode("utf-8") for raw in result.stdout.split(b"\0") if raw]
 
 
-def publication_paths() -> list[Path]:
-    published = []
-    for path in tracked_paths():
-        relative = path.relative_to(ROOT).as_posix()
-        if relative in PUBLIC_ROOT_FILES or relative.startswith(PUBLIC_DIRECTORIES):
-            if "__pycache__" not in relative and not relative.endswith((".pyc", "-report.md")):
-                published.append(path)
-    return published
-
-
-def publication_text_files() -> list[Path]:
+def tracked_text_files() -> list[Path]:
     paths = []
-    for path in publication_paths():
+    for path in tracked_paths():
+        if path.relative_to(ROOT).as_posix().startswith(".superpowers/"):
+            continue
         data = path.read_bytes()
         if b"\0" not in data:
             data.decode("utf-8")
@@ -81,17 +70,24 @@ def files_matching(values: tuple[str, ...], files: list[Path]) -> list[str]:
     return matches
 
 
-def test_tracked_text_files_contain_no_private_identifiers() -> None:
-    assert files_matching(private_identifiers(), publication_text_files()) == []
-
-
-def test_publication_text_files_contain_no_generic_secret_patterns() -> None:
+def test_tracked_public_text_files_contain_no_generic_secret_patterns() -> None:
     matches = []
-    for path in publication_text_files():
+    for path in tracked_text_files():
         text = path.read_text(encoding="utf-8")
         if any(pattern.search(text) for pattern in SECRET_PATTERNS):
             matches.append(path.relative_to(ROOT).as_posix())
     assert matches == []
+
+
+def test_release_audit_requires_external_denylist() -> None:
+    if os.environ.get("HERMES_RELEASE_AUDIT") != "1":
+        pytest.skip("set HERMES_RELEASE_AUDIT=1 for the private pre-publication audit")
+    if not private_identifiers():
+        pytest.fail(
+            "HERMES_RELEASE_AUDIT=1 requires a nonempty "
+            "HERMES_PUBLIC_RELEASE_DENYLIST or HERMES_PUBLIC_RELEASE_DENYLIST_FILE"
+        )
+    assert files_matching(private_identifiers(), tracked_text_files()) == []
 
 
 def test_env_template_has_exact_generic_values() -> None:
@@ -120,16 +116,152 @@ def test_optional_external_denylist_is_enforced_without_tracked_literals(tmp_pat
     assert files_matching(private_identifiers(), [sample]) == ["candidate.txt"]
 
 
-def test_publication_allowlist_excludes_development_reports_and_caches() -> None:
-    published = [path.relative_to(ROOT).as_posix() for path in publication_text_files()]
-    excluded = [path.relative_to(ROOT).as_posix() for path in tracked_paths() if path not in publication_paths()]
+def make_release_source(tmp_path: Path, files: dict[str, str]) -> Path:
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    for relative, contents in files.items():
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    return source
 
-    assert published
-    assert not any(path.startswith(".superpowers/") for path in published)
-    assert not any("__pycache__" in path or path.endswith(".pyc") for path in published)
-    assert not any(path.endswith("-report.md") for path in published)
-    assert excluded
-    assert all(path.startswith(DEVELOPMENT_DIRECTORIES) for path in excluded)
+
+def run_builder(source: Path, destination: Path, denylist: Path | None = None):
+    command = [sys.executable, str(BUILDER), "--source", str(source), "--destination", str(destination)]
+    if denylist is not None:
+        command.extend(("--denylist-file", str(denylist)))
+    return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def safe_release_files() -> dict[str, str]:
+    return {
+        ".gitignore": ".superpowers/\n__pycache__/\n",
+        "README.md": "Generic XMPP plugin\n",
+        "deploy/hermes.env.example": "XMPP_JID=bot@example.com/Hermes\n",
+        "hermes-xmpp/plugin.yaml": "name: xmpp-platform\n",
+        "scripts/build-public-release.py": "# release builder\n",
+        "tests/test_public_release.py": "def test_placeholder(): pass\n",
+        "docs/superpowers/plans/internal.md": "development plan\n",
+        ".superpowers/sdd/task-report.md": "development report\n",
+    }
+
+
+def external_denylist(tmp_path: Path) -> Path:
+    path = tmp_path / "denylist.txt"
+    path.write_text("sensitive.internal\n", encoding="utf-8")
+    return path
+
+
+def test_builder_requires_nonempty_external_denylist(tmp_path) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+
+    result = run_builder(source, tmp_path / "release")
+
+    assert result.returncode != 0
+    assert "denylist" in result.stderr.casefold()
+
+
+def test_builder_rejects_repository_local_denylist_unless_ignored(tmp_path) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    denylist = source / "local-denylist.txt"
+    denylist.write_text("sensitive.internal\n", encoding="utf-8")
+
+    rejected = run_builder(source, tmp_path / "rejected", denylist)
+    assert rejected.returncode != 0
+    assert "ignored" in rejected.stderr.casefold()
+
+    with (source / ".gitignore").open("a", encoding="utf-8") as ignore:
+        ignore.write("local-denylist.txt\n")
+    accepted = run_builder(source, tmp_path / "accepted", denylist)
+    assert accepted.returncode == 0, accepted.stderr
+
+
+def test_builder_copies_exact_safe_tree_and_excludes_development_docs(tmp_path) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    destination = tmp_path / "release"
+
+    result = run_builder(source, destination, external_denylist(tmp_path))
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file()) == [
+        ".gitignore",
+        "README.md",
+        "deploy/hermes.env.example",
+        "hermes-xmpp/plugin.yaml",
+        "scripts/build-public-release.py",
+        "tests/test_public_release.py",
+    ]
+    assert not (destination / ".git").exists()
+    assert not (destination / "docs/superpowers").exists()
+    assert not (destination / ".superpowers").exists()
+
+
+def test_builder_rejects_unexpected_tracked_path(tmp_path) -> None:
+    files = safe_release_files()
+    files["hermes-xmpp/private-notes.txt"] = "unexpected\n"
+    source = make_release_source(tmp_path, files)
+
+    result = run_builder(source, tmp_path / "release", external_denylist(tmp_path))
+
+    assert result.returncode != 0
+    assert "hermes-xmpp/private-notes.txt" in result.stderr
+
+
+def test_builder_rejects_private_identifier_before_copy(tmp_path) -> None:
+    files = safe_release_files()
+    files["README.md"] = "connect to sensitive.internal\n"
+    source = make_release_source(tmp_path, files)
+    destination = tmp_path / "release"
+
+    result = run_builder(source, destination, external_denylist(tmp_path))
+
+    assert result.returncode != 0
+    assert "README.md" in result.stderr
+    assert not destination.exists()
+
+
+def test_builder_rejects_nonempty_destination(tmp_path) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    destination = tmp_path / "release"
+    destination.mkdir()
+    (destination / "keep.txt").write_text("keep", encoding="utf-8")
+
+    result = run_builder(source, destination, external_denylist(tmp_path))
+
+    assert result.returncode != 0
+    assert (destination / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
+def test_builder_rejects_tracked_symlink_or_special_file(tmp_path, unsafe_kind) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    target = source / "README.md"
+    target.unlink()
+    try:
+        if unsafe_kind == "symlink":
+            target.symlink_to(source / "deploy/hermes.env.example")
+        else:
+            target.mkdir()
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+
+    result = run_builder(source, tmp_path / "release", external_denylist(tmp_path))
+
+    assert result.returncode != 0
+    assert "README.md" in result.stderr
+
+
+def test_builder_rejects_generic_secret_pattern(tmp_path) -> None:
+    files = safe_release_files()
+    files["README.md"] = "API_TOKEN=not-for-publication\n"
+    source = make_release_source(tmp_path, files)
+
+    result = run_builder(source, tmp_path / "release", external_denylist(tmp_path))
+
+    assert result.returncode != 0
+    assert "README.md" in result.stderr
 
 
 @pytest.mark.parametrize(
