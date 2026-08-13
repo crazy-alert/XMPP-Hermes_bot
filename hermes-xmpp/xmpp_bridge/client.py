@@ -86,12 +86,17 @@ class HermesXmppClient(ClientXMPP):
             if not ready.done():
                 ready.set_exception(ConnectionError(str(error)))
 
-        def connection_attempt_done(attempt: asyncio.Future[object]) -> None:
-            if attempt.cancelled():
-                return
-            error = attempt.exception()
-            if error is not None and not ready.done():
-                ready.set_exception(ConnectionError(str(error)))
+        async def observe_connection_attempt(attempt: Awaitable[object]) -> None:
+            current = attempt
+            while inspect.isawaitable(current):
+                try:
+                    current = await current
+                except asyncio.CancelledError:
+                    return
+                except BaseException as error:
+                    if not ready.done():
+                        ready.set_exception(ConnectionError(str(error)))
+                    return
 
         error_events = ("failed_auth", "ssl_invalid_chain")
         for event_name in error_events:
@@ -99,12 +104,18 @@ class HermesXmppClient(ClientXMPP):
         try:
             result = self.connect(self.config.host, self.config.port)
             if inspect.isawaitable(result):
-                asyncio.ensure_future(result).add_done_callback(connection_attempt_done)
+                attempt_observer = asyncio.create_task(observe_connection_attempt(result))
+            else:
+                attempt_observer = None
             await ready
         except BaseException:
             self.cancel_connection_attempt()
             raise
         finally:
+            if attempt_observer is not None and not attempt_observer.done():
+                attempt_observer.cancel()
+                with suppress(asyncio.CancelledError):
+                    await attempt_observer
             if self._session_ready is ready:
                 self._session_ready = None
             for event_name in error_events:

@@ -299,9 +299,9 @@ def test_per_candidate_connection_failure_does_not_abort_fallback_connect_loop(t
         assert not ready.done()
         assert not connection_attempt.cancelled()
 
+        connection_attempt.set_result(None)
         client.event("session_start")
         await ready
-        connection_attempt.set_result(None)
         await client.stop()
 
     asyncio.run(scenario())
@@ -320,6 +320,55 @@ def test_connect_and_wait_fails_when_connect_loop_exhausts(tmp_path):
 
         with pytest.raises(ConnectionError, match="all connection candidates exhausted"):
             await asyncio.wait_for(client.connect_and_wait(), timeout=0.1)
+
+        await client.stop()
+
+    asyncio.run(scenario())
+
+
+def test_connect_and_wait_observes_rescheduled_attempt_future_chain(tmp_path):
+    async def scenario():
+        client = make_client(tmp_path)
+        outer_attempt = asyncio.get_running_loop().create_future()
+        rescheduled_attempt = asyncio.get_running_loop().create_future()
+        client.connect = lambda host=None, port=None: outer_attempt
+
+        ready = asyncio.create_task(client.connect_and_wait())
+        await asyncio.sleep(0)
+        outer_attempt.set_result(rescheduled_attempt)
+        await asyncio.sleep(0)
+
+        assert not ready.done()
+
+        rescheduled_attempt.set_exception(OSError("rescheduled attempt terminated"))
+        with pytest.raises(ConnectionError, match="rescheduled attempt terminated"):
+            await asyncio.wait_for(ready, timeout=0.1)
+
+        await client.stop()
+
+    asyncio.run(scenario())
+
+
+def test_session_readiness_wins_over_late_rescheduled_attempt_failure(tmp_path):
+    async def scenario():
+        client = make_client(tmp_path)
+        outer_attempt = asyncio.get_running_loop().create_future()
+        rescheduled_attempt = asyncio.get_running_loop().create_future()
+        client.connect = lambda host=None, port=None: outer_attempt
+        client.send_presence = lambda: None
+        client.get_roster = lambda: None
+
+        ready = asyncio.create_task(client.connect_and_wait())
+        await asyncio.sleep(0)
+        outer_attempt.set_result(rescheduled_attempt)
+        await asyncio.sleep(0)
+
+        rescheduled_attempt.set_exception(OSError("concurrent attempt failure"))
+        await client.event_async("session_start")
+        await asyncio.wait_for(ready, timeout=0.1)
+
+        await asyncio.sleep(0)
+        assert rescheduled_attempt.exception().args == ("concurrent attempt failure",)
 
         await client.stop()
 
