@@ -354,6 +354,54 @@ def test_builder_rejects_source_replaced_after_validation_and_cleans_staging(tmp
     with pytest.raises(module.ReleaseError):
         module.build(source, destination, external_denylist(tmp_path))
     assert not destination.exists()
+    assert list(tmp_path.glob(".release.staging-*"))
+
+
+@pytest.mark.parametrize("swap_point", ["after_check", "mid_cleanup"])
+def test_cleanup_never_deletes_through_swapped_staging_path(tmp_path, monkeypatch, swap_point) -> None:
+    module = load_builder_module()
+    external = tmp_path / "external"
+    external.mkdir()
+    for name in ("first.txt", "second.txt"):
+        (external / name).write_text("preserve", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    created = []
+    for name in ("first.txt", "second.txt"):
+        path = staging / name
+        path.write_text("owned", encoding="utf-8")
+        created.append(path)
+    file_stat = staging.lstat()
+    bound = module.BoundDestination(
+        staging,
+        module._identity(file_stat),
+        None,
+        tmp_path,
+        module._stable_identity(tmp_path.lstat()),
+        None,
+        created,
+        [],
+    )
+    original_check = module._check_bound
+    checks = 0
+
+    def swap_after_check(destination):
+        nonlocal checks
+        original_check(destination)
+        checks += 1
+        threshold = 1 if swap_point == "after_check" else 2
+        if checks == threshold:
+            staging.rename(tmp_path / f"displaced-{swap_point}")
+            staging.symlink_to(external, target_is_directory=True)
+
+    monkeypatch.setattr(module, "_check_bound", swap_after_check)
+
+    module._cleanup_destination(bound)
+
+    assert {(path.name, path.read_text(encoding="utf-8")) for path in external.iterdir()} == {
+        ("first.txt", "preserve"),
+        ("second.txt", "preserve"),
+    }
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])

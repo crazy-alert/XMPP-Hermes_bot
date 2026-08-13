@@ -396,27 +396,8 @@ def _audit_destination(destination: BoundDestination, expected: list[VerifiedSou
 
 
 def _cleanup_destination(destination: BoundDestination) -> None:
-    try:
-        _check_bound(destination)
-    except ReleaseError:
-        return
-    for path in reversed(destination.created_files):
-        try:
-            if not path.is_symlink():
-                path.unlink()
-        except OSError:
-            pass
-    for path in reversed(destination.created_dirs):
-        try:
-            if not path.is_symlink():
-                path.rmdir()
-        except OSError:
-            pass
-    try:
-        _check_bound(destination)
-        destination.path.rmdir()
-    except (OSError, ReleaseError):
-        pass
+    """Never delete after failure: a hostile rename could redirect path cleanup."""
+    return
 
 
 def _publish_destination(destination: BoundDestination, final_path: Path) -> None:
@@ -428,7 +409,10 @@ def _publish_destination(destination: BoundDestination, final_path: Path) -> Non
             if destination.parent_descriptor is None:
                 raise ReleaseError("destination parent is not bound")
             libc = ctypes.CDLL(None, use_errno=True)
-            renameat2 = libc.renameat2
+            try:
+                renameat2 = libc.renameat2
+            except AttributeError as error:
+                raise ReleaseError("secure no-replace publication is unavailable on this Linux") from error
             renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
             renameat2.restype = ctypes.c_int
             result = renameat2(
@@ -463,8 +447,10 @@ def build(source: Path, destination: Path, denylist_file: Path) -> None:
         copy_release(source, bound, verified)
         _audit_destination(bound, verified)
         _publish_destination(bound, destination)
-    except BaseException:
+    except BaseException as error:
         _cleanup_destination(bound)
+        if isinstance(error, ReleaseError):
+            raise ReleaseError(f"{error}; private staging retained at: {bound.path}") from error
         raise
     finally:
         if bound.descriptor is not None:
