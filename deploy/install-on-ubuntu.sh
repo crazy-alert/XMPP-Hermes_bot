@@ -78,12 +78,19 @@ if getent passwd hermes >/dev/null; then
 fi
 
 HERMES_LOCAL_DISK=$(path_at /var/lib/hermes/.local)
-if [ -e "$HERMES_LOCAL_DISK" ] || [ -L "$HERMES_LOCAL_DISK" ]; then
-    if [ ! -d "$HERMES_LOCAL_DISK" ] || [ -L "$HERMES_LOCAL_DISK" ]; then
-        printf '%s\n' 'Ошибка: /var/lib/hermes/.local должен быть обычным каталогом, а не ссылкой или файлом.' >&2
-        exit 1
+PLUGIN_PARENT=$(dirname -- "$PLUGIN_DEST")
+reject_unsafe_existing_dir() {
+    directory=$1
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+            printf 'Ошибка: путь Hermes должен быть обычным каталогом, а не ссылкой или файлом: %s\n' "$directory" >&2
+            exit 1
+        fi
     fi
-fi
+}
+for directory in "$HERMES_LOCAL_DISK" "$HERMES_HOME_DISK" "$PLUGIN_PARENT"; do
+    reject_unsafe_existing_dir "$directory"
+done
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -110,8 +117,8 @@ secure_hermes_dir() {
 secure_dir "$(path_at /var/lib/hermes)" hermes hermes 0700
 secure_hermes_dir "$HERMES_LOCAL_DISK"
 secure_hermes_dir "$(path_at /var/lib/hermes/.local/bin)"
-secure_dir "$HERMES_HOME_DISK" hermes hermes 0700
-secure_dir "$(dirname -- "$PLUGIN_DEST")" hermes hermes 0700
+secure_hermes_dir "$HERMES_HOME_DISK"
+secure_hermes_dir "$PLUGIN_PARENT"
 secure_dir "$(dirname -- "$ENV_FILE")" root root 0750
 secure_dir "$(dirname -- "$UNIT_FILE")" root root 0755
 

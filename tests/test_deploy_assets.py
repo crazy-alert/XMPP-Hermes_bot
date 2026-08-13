@@ -368,6 +368,74 @@ def test_unsafe_existing_local_path_fails_before_mutation(tmp_path: Path, unsafe
     assert not (fake_root / "etc/systemd/system/hermes-gateway.service").exists()
 
 
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "dangling_symlink", "file"])
+def test_unsafe_existing_hermes_home_fails_before_mutation(tmp_path: Path, unsafe_kind: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    account_home = fake_root / "var/lib/hermes"
+    account_home.mkdir(parents=True)
+    hermes_home = account_home / ".hermes"
+    external = tmp_path / "external-hermes"
+    external.mkdir()
+    marker = external / "marker"
+    marker.write_text("unchanged")
+    before_mode = stat.S_IMODE(external.stat().st_mode)
+    try:
+        if unsafe_kind == "symlink":
+            hermes_home.symlink_to(external, target_is_directory=True)
+        elif unsafe_kind == "dangling_symlink":
+            hermes_home.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+        else:
+            hermes_home.write_text("not a directory")
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    generated = generated_installer(tmp_path, fake_root)
+    result = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
+
+    assert result.returncode != 0
+    assert marker.read_text() == "unchanged"
+    assert stat.S_IMODE(external.stat().st_mode) == before_mode
+    log_path = tmp_path / "commands.log"
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
+    assert not (fake_root / "etc/hermes/hermes.env").exists()
+    assert not (fake_root / "etc/systemd/system/hermes-gateway.service").exists()
+    assert not (hermes_home / "plugins/xmpp-platform").exists()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "dangling_symlink", "file"])
+def test_unsafe_existing_plugins_path_fails_before_mutation(tmp_path: Path, unsafe_kind: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    hermes_home = fake_root / "var/lib/hermes/.hermes"
+    hermes_home.mkdir(parents=True)
+    plugins = hermes_home / "plugins"
+    external = tmp_path / "external-plugins"
+    external.mkdir()
+    marker = external / "marker"
+    marker.write_text("unchanged")
+    before_mode = stat.S_IMODE(external.stat().st_mode)
+    try:
+        if unsafe_kind == "symlink":
+            plugins.symlink_to(external, target_is_directory=True)
+        elif unsafe_kind == "dangling_symlink":
+            plugins.symlink_to(tmp_path / "missing-plugins", target_is_directory=True)
+        else:
+            plugins.write_text("not a directory")
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    generated = generated_installer(tmp_path, fake_root)
+    result = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
+
+    assert result.returncode != 0
+    assert marker.read_text() == "unchanged"
+    assert stat.S_IMODE(external.stat().st_mode) == before_mode
+    log_path = tmp_path / "commands.log"
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
+    assert not (fake_root / "etc/hermes/hermes.env").exists()
+    assert not (fake_root / "etc/systemd/system/hermes-gateway.service").exists()
+    assert not (plugins / "xmpp-platform").exists()
+
+
 def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path) -> None:
     result, root, env = run_installer(tmp_path)
     assert result.returncode == 0, result.stderr
