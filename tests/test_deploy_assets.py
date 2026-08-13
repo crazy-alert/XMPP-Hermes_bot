@@ -153,6 +153,7 @@ def generated_installer(tmp_path: Path, fake_root: Path, *, inject_after: str | 
         'SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)': f"SCRIPT_DIR={deploy!r}",
         'REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)': f"REPO_DIR={repo!r}",
         '    install -d -o "$2" -g "$3" -m "$4" "$1"': '    mkdir -p -- "$1"\n    chmod "$4" "$1"',
+        '    if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c %U "$directory")" != hermes ]; then': '    if [ ! -d "$directory" ] || [ -L "$directory" ]; then',
         '    [ -z "$(find /var/lib/hermes -xdev ! -user hermes -print -quit)" ] || return 1': '    : # ownership is asserted through the chown stub in this generated copy',
         'in /var/lib/hermes/*) : ;;': f'in {prefix}/var/lib/hermes/*) : ;;',
         '    printf \'%s  %s\\n\' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status': '    : # fake upstream fixture; production digest check is unchanged',
@@ -234,7 +235,8 @@ def test_official_installer_digest_matches_audited_pinned_commit() -> None:
 def test_runtime_paths_match_pinned_installer_contract() -> None:
     script = read_asset("deploy/install-on-ubuntu.sh")
     assert "UV_BIN=$HERMES_HOME/bin/uv" in script
-    assert 'secure_dir "$(path_at /var/lib/hermes/.local)" hermes hermes 0700' in script
+    assert 'secure_hermes_dir "$HERMES_LOCAL_DISK"' in script
+    assert 'chown --no-dereference hermes:hermes "$directory"' in script
 
 
 @pytest.mark.parametrize(
@@ -334,6 +336,36 @@ def test_identity_conflict_fails_before_apt(tmp_path: Path) -> None:
     assert result.returncode != 0
     log_path = tmp_path / "commands.log"
     assert not log_path.exists() or "apt-get" not in log_path.read_text()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "file"])
+def test_unsafe_existing_local_path_fails_before_mutation(tmp_path: Path, unsafe_kind: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    hermes_home = fake_root / "var/lib/hermes"
+    hermes_home.mkdir(parents=True)
+    local_path = hermes_home / ".local"
+    external = tmp_path / "external"
+    external.mkdir()
+    marker = external / "marker"
+    marker.write_text("unchanged")
+    before_mode = stat.S_IMODE(external.stat().st_mode)
+    if unsafe_kind == "symlink":
+        try:
+            local_path.symlink_to(external, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"directory symlinks are unavailable: {exc}")
+    else:
+        local_path.write_text("not a directory")
+
+    generated = generated_installer(tmp_path, fake_root)
+    result = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
+
+    assert result.returncode != 0
+    assert marker.read_text() == "unchanged"
+    assert stat.S_IMODE(external.stat().st_mode) == before_mode
+    log_path = tmp_path / "commands.log"
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
+    assert not (fake_root / "etc/systemd/system/hermes-gateway.service").exists()
 
 
 def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path) -> None:

@@ -77,6 +77,14 @@ if getent passwd hermes >/dev/null; then
     fi
 fi
 
+HERMES_LOCAL_DISK=$(path_at /var/lib/hermes/.local)
+if [ -e "$HERMES_LOCAL_DISK" ] || [ -L "$HERMES_LOCAL_DISK" ]; then
+    if [ ! -d "$HERMES_LOCAL_DISK" ] || [ -L "$HERMES_LOCAL_DISK" ]; then
+        printf '%s\n' 'Ошибка: /var/lib/hermes/.local должен быть обычным каталогом, а не ссылкой или файлом.' >&2
+        exit 1
+    fi
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev
@@ -89,9 +97,19 @@ fi
 secure_dir() {
     install -d -o "$2" -g "$3" -m "$4" "$1"
 }
+secure_hermes_dir() {
+    directory=$1
+    runuser -u hermes -- mkdir -p -- "$directory"
+    chown --no-dereference hermes:hermes "$directory"
+    if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c %U "$directory")" != hermes ]; then
+        printf 'Ошибка: небезопасный каталог Hermes: %s\n' "$directory" >&2
+        exit 1
+    fi
+    runuser -u hermes -- chmod 0700 -- "$directory"
+}
 secure_dir "$(path_at /var/lib/hermes)" hermes hermes 0700
-secure_dir "$(path_at /var/lib/hermes/.local)" hermes hermes 0700
-secure_dir "$(path_at /var/lib/hermes/.local/bin)" hermes hermes 0700
+secure_hermes_dir "$HERMES_LOCAL_DISK"
+secure_hermes_dir "$(path_at /var/lib/hermes/.local/bin)"
 secure_dir "$HERMES_HOME_DISK" hermes hermes 0700
 secure_dir "$(dirname -- "$PLUGIN_DEST")" hermes hermes 0700
 secure_dir "$(dirname -- "$ENV_FILE")" root root 0750
