@@ -96,26 +96,6 @@ fi
 HERMES_LOCAL_DISK=$(path_at /var/lib/hermes/.local)
 HERMES_CACHE_DISK=$(path_at /var/lib/hermes/.cache)
 PLUGIN_PARENT=$(dirname -- "$PLUGIN_DEST")
-reject_unsafe_existing_file() {
-    file=$1
-    if [ -e "$file" ] || [ -L "$file" ]; then
-        if [ ! -f "$file" ] || [ -L "$file" ]; then
-            printf 'Ошибка: исполняемый путь Hermes должен быть обычным файлом, а не ссылкой или каталогом: %s\n' "$file" >&2
-            exit 1
-        fi
-    fi
-}
-for directory in "$HERMES_LOCAL_DISK" "$HERMES_HOME_DISK" "$PLUGIN_PARENT" "$HERMES_AGENT_DISK" "$HERMES_VENV_DISK" "$HERMES_VENV_BIN_DISK" "$HERMES_BIN_PARENT_DISK"; do
-    reject_unsafe_existing_dir "$directory"
-done
-for file in "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK"; do
-    reject_unsafe_existing_file "$file"
-done
-
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev
-
 if ! getent group hermes >/dev/null; then groupadd --system hermes; fi
 if ! getent passwd hermes >/dev/null; then
     useradd --system --create-home --home-dir /var/lib/hermes --gid hermes --shell /usr/sbin/nologin hermes
@@ -136,6 +116,33 @@ reject_unsafe_existing_dir "$HERMES_ACCOUNT_HOME_DISK"
 secure_dir "$HERMES_ACCOUNT_HOME_DISK" root root 0755
 if [ -L "$HERMES_ACCOUNT_HOME_DISK" ] || [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then
     printf '%s\n' 'Ошибка: /var/lib/hermes не является доверенным каталогом root:root 0755.' >&2
+    exit 1
+fi
+runuser -u hermes -- sh -c '
+    for directory in "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"; do
+        if test -e "$directory" || test -L "$directory"; then
+            test -d "$directory" && test ! -L "$directory" || exit 1
+        fi
+    done
+    for file in "$9" "${10}" "${11}"; do
+        if test -e "$file" || test -L "$file"; then
+            test -f "$file" && test ! -L "$file" || exit 1
+        fi
+    done
+' sh "$HERMES_LOCAL_DISK" "$HERMES_HOME_DISK" "$HERMES_CACHE_DISK" "$PLUGIN_PARENT" "$HERMES_AGENT_DISK" \
+    "$HERMES_VENV_DISK" "$HERMES_VENV_BIN_DISK" "$HERMES_BIN_PARENT_DISK" \
+    "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK" || {
+    printf '%s\n' 'Ошибка: небезопасный существующий путь среды Hermes.' >&2
+    exit 1
+}
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev
+
+reject_unsafe_existing_dir "$HERMES_ACCOUNT_HOME_DISK"
+if [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then
+    printf '%s\n' 'Ошибка: /var/lib/hermes перестал быть доверенным каталогом root:root 0755.' >&2
     exit 1
 fi
 secure_runtime_root "$HERMES_LOCAL_DISK"

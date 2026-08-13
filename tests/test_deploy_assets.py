@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -169,6 +170,7 @@ def generated_installer(
         '    if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c %U "$directory")" != hermes ]; then': '    if [ ! -d "$directory" ] || [ -L "$directory" ]; then',
         '        test -z "$(find "$4" -xdev ! -user hermes -print -quit)" || exit 1': '        : # ownership is asserted through the chown stub in this generated copy',
         'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ] || [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then': 'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ]; then',
+        'if [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then': 'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ]; then',
         'in /var/lib/hermes/*) : ;;': f'in {prefix}/var/lib/hermes/*) : ;;',
         '    printf \'%s  %s\\n\' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status': '    : # fake upstream fixture; production digest check is unchanged',
     }
@@ -262,15 +264,19 @@ def test_runtime_paths_match_pinned_installer_contract() -> None:
 
 def test_root_never_traverses_hermes_owned_runtime_paths() -> None:
     script = read_asset("deploy/install-on-ubuntu.sh")
-    forbidden = (
-        '[ -f "$executable" ]',
-        '[ -e "$PLUGIN_DEST" ]',
-        '[ -e "$PLUGIN_BACKUP" ]',
-        '[ -f "$PLUGIN_STAGE/xmpp_bridge/__init__.py" ]',
-        'find "$PLUGIN_SOURCE_STAGE/xmpp_bridge"',
-    )
-    assert all(value not in script for value in forbidden)
-    assert "runuser -u hermes -- sh -c" in script
+    root_dir_checks = re.findall(r'^reject_unsafe_existing_dir "\$(\w+)"$', script, re.MULTILINE)
+    root_file_checks = re.findall(r'^reject_unsafe_existing_file "\$(\w+)"$', script, re.MULTILINE)
+    assert root_dir_checks == ["HERMES_ACCOUNT_HOME_DISK"] * 3
+    assert root_file_checks == []
+    descendant_preflight = script.index("runuser -u hermes -- sh -c '")
+    assert descendant_preflight < script.index("apt-get update")
+    preflight_call = script[descendant_preflight:script.index("apt-get update")]
+    for variable in (
+        "HERMES_LOCAL_DISK", "HERMES_HOME_DISK", "HERMES_CACHE_DISK", "PLUGIN_PARENT",
+        "HERMES_AGENT_DISK", "HERMES_VENV_DISK", "HERMES_VENV_BIN_DISK",
+        "HERMES_BIN_PARENT_DISK", "HERMES_BIN_DISK", "HERMES_PYTHON_DISK", "UV_BIN_DISK",
+    ):
+        assert f'"${variable}"' in preflight_call
 
 
 @pytest.mark.parametrize(
