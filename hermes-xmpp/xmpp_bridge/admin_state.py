@@ -1,4 +1,9 @@
-"""Atomic, private configuration storage for XMPP administrative commands."""
+"""Atomic XMPP admin state; persistent operations are supported only on POSIX/Linux.
+
+Windows development hosts may import this module for validation and Win32 ABI
+checks, but every persistent ``AdminState`` method fails closed before opening a
+configured state path.
+"""
 
 from __future__ import annotations
 

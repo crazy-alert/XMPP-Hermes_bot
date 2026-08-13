@@ -19,9 +19,28 @@ from xmpp_bridge.admin_state import AdminConfig, AdminState, AdminStateError, Co
 OWNER = "Owner@Example.Com/phone"
 
 
+PERSISTENCE_TESTS = {
+    "test_initial_owner_normalizes_and_snapshot_never_contains_token",
+    "test_mutation_normalizes_jids_and_advances_revision",
+    "test_https_or_loopback_endpoint_is_allowed",
+    "test_cannot_remove_last_owner_or_persist_empty_owners",
+    "test_set_token_persists_secret_but_exposes_only_mask",
+    "test_atomic_write_uses_private_mode_fsync_and_replace",
+    "test_symlink_and_nonregular_state_fail_closed",
+    "test_symlink_parent_fails_before_creating_state_or_lock",
+    "test_corrupt_and_interrupted_files_fail_closed_without_overwrite",
+    "test_mutate_reloads_current_disk_state_to_avoid_lost_updates",
+    "test_failed_replace_preserves_prior_complete_state",
+    "test_independent_instances_serialize_concurrent_mutations",
+    "test_independent_processes_serialize_concurrent_mutations",
+    "test_parent_swap_is_detected_before_state_write",
+    "test_stale_lock_from_dead_process_is_recovered_but_live_lock_is_not_stolen",
+}
+
+
 @pytest.fixture(autouse=True)
 def require_posix_persistence(request):
-    if os.name == "nt" and request.node.name != "test_windows_persistent_mutation_fails_closed":
+    if os.name == "nt" and request.node.name in PERSISTENCE_TESTS:
         pytest.skip("persistent AdminState is POSIX/Linux-only")
 
 
@@ -64,10 +83,8 @@ def test_mutation_normalizes_jids_and_advances_revision(tmp_path):
 
 @pytest.mark.parametrize("endpoint", ["http://example.com", "ftp://example.com", "https://", "https://example.com user"])
 def test_invalid_endpoint_is_rejected(tmp_path, endpoint):
-    state = AdminState(tmp_path / "admin.json", OWNER)
-
     with pytest.raises(ConfigValidationError):
-        state.mutate(lambda config: config.with_changes(endpoint=endpoint))
+        AdminConfig(frozenset({"owner@example.com"}), frozenset(), None, None, None, False).with_changes(endpoint=endpoint)
 
 
 def test_https_or_loopback_endpoint_is_allowed(tmp_path):
@@ -305,3 +322,9 @@ def test_windows_persistent_mutation_fails_closed(tmp_path, monkeypatch):
 
     with pytest.raises(AdminStateError, match="requires POSIX/Linux"):
         state.load()
+    with pytest.raises(AdminStateError, match="requires POSIX/Linux"):
+        state.token()
+    with pytest.raises(AdminStateError, match="requires POSIX/Linux"):
+        state.mutate(lambda config: config)
+    with pytest.raises(AdminStateError, match="requires POSIX/Linux"):
+        state.set_token("secret")
