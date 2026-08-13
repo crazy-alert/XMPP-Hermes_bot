@@ -167,7 +167,9 @@ rollback() {
         if [ "$UNIT_SWAPPED" = 1 ]; then rm -f -- "$UNIT_FILE"; fi
         if [ "$UNIT_BACKED_UP" = 1 ] && [ -e "$UNIT_BACKUP" ]; then mv -- "$UNIT_BACKUP" "$UNIT_FILE"; fi
         if [ "$PLUGIN_SWAPPED" = 1 ]; then runuser -u hermes -- rm -rf -- "$PLUGIN_DEST"; fi
-        if [ "$PLUGIN_BACKED_UP" = 1 ] && [ -e "$PLUGIN_BACKUP" ]; then runuser -u hermes -- mv -- "$PLUGIN_BACKUP" "$PLUGIN_DEST"; fi
+        if [ "$PLUGIN_BACKED_UP" = 1 ]; then
+            runuser -u hermes -- sh -c 'test ! -e "$1" || mv -- "$1" "$2"' sh "$PLUGIN_BACKUP" "$PLUGIN_DEST"
+        fi
         systemctl daemon-reload >/dev/null 2>&1 || true
         [ "$WAS_ENABLED" = 0 ] || systemctl enable hermes-gateway >/dev/null 2>&1 || true
         [ "$WAS_ACTIVE" = 0 ] || systemctl start hermes-gateway >/dev/null 2>&1 || true
@@ -179,14 +181,16 @@ rollback() {
 trap rollback EXIT
 
 validate_runtime() {
-    for executable in "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK"; do
-        [ -f "$executable" ] && [ ! -L "$executable" ] && [ -x "$executable" ] || return 1
-    done
     case "$HERMES_BIN_DISK:$HERMES_PYTHON_DISK:$UV_BIN_DISK" in /var/lib/hermes/*) : ;; *) return 1 ;; esac
-    [ -z "$(runuser -u hermes -- find "$HERMES_HOME_DISK" -xdev ! -user hermes -print -quit)" ] || return 1
-    runuser -u hermes -- "$HERMES_PYTHON_DISK" -c 'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'
-    runuser -u hermes -- "$HERMES_BIN_DISK" --version >/dev/null
-    runuser -u hermes -- "$UV_BIN_DISK" --version >/dev/null
+    runuser -u hermes -- sh -c '
+        for executable in "$1" "$2" "$3"; do
+            test -f "$executable" && test ! -L "$executable" && test -x "$executable" || exit 1
+        done
+        test -z "$(find "$4" -xdev ! -user hermes -print -quit)" || exit 1
+        "$2" -c "import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)"
+        "$1" --version >/dev/null
+        "$3" --version >/dev/null
+    ' sh "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK" "$HERMES_HOME_DISK"
 }
 
 # Runtime installation is separate and idempotent. Docker access is granted only after validation.
@@ -208,11 +212,16 @@ mkdir -p -- "$PLUGIN_SOURCE_STAGE/xmpp_bridge"
 while IFS= read -r source_file; do cp -- "$source_file" "$PLUGIN_SOURCE_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
 chown -R hermes:hermes "$PLUGIN_SOURCE_STAGE"
 chmod -R go-rwx "$PLUGIN_SOURCE_STAGE"
-runuser -u hermes -- cp -- "$PLUGIN_SOURCE_STAGE/adapter.py" "$PLUGIN_SOURCE_STAGE/plugin.yaml" "$PLUGIN_STAGE/"
-runuser -u hermes -- mkdir -p -- "$PLUGIN_STAGE/xmpp_bridge"
-while IFS= read -r source_file; do runuser -u hermes -- cp -- "$source_file" "$PLUGIN_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE_STAGE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
-[ -f "$PLUGIN_STAGE/xmpp_bridge/__init__.py" ] || { printf '%s\n' 'Ошибка: отсутствует xmpp_bridge/__init__.py.' >&2; exit 1; }
-runuser -u hermes -- chmod -R go-rwx "$PLUGIN_STAGE"
+runuser -u hermes -- sh -c '
+    cp -- "$1/adapter.py" "$1/plugin.yaml" "$2/"
+    mkdir -p -- "$2/xmpp_bridge"
+    for source_file in "$1"/xmpp_bridge/*.py; do
+        test -f "$source_file" && test ! -L "$source_file" || exit 1
+        cp -- "$source_file" "$2/xmpp_bridge/"
+    done
+    test -f "$2/xmpp_bridge/__init__.py" && test ! -L "$2/xmpp_bridge/__init__.py" || exit 1
+    chmod -R go-rwx "$2"
+' sh "$PLUGIN_SOURCE_STAGE" "$PLUGIN_STAGE" || { printf '%s\n' 'Ошибка: не удалось подготовить плагин XMPP.' >&2; exit 1; }
 
 sed "s|^ExecStart=.*|ExecStart=$HERMES_BIN gateway run|" "$SCRIPT_DIR/hermes-gateway.service" >"$UNIT_STAGE"
 chmod 0644 "$UNIT_STAGE"
@@ -234,7 +243,10 @@ systemctl is-enabled --quiet hermes-gateway && WAS_ENABLED=1 || true
 TRANSACTION=1
 if [ "$WAS_ACTIVE" = 1 ]; then systemctl stop hermes-gateway; fi
 
-if [ -e "$PLUGIN_DEST" ]; then runuser -u hermes -- mv -- "$PLUGIN_DEST" "$PLUGIN_BACKUP"; PLUGIN_BACKED_UP=1; fi
+if runuser -u hermes -- sh -c 'test -e "$1"' sh "$PLUGIN_DEST"; then
+    runuser -u hermes -- mv -- "$PLUGIN_DEST" "$PLUGIN_BACKUP"
+    PLUGIN_BACKED_UP=1
+fi
 runuser -u hermes -- mv -- "$PLUGIN_STAGE" "$PLUGIN_DEST"
 PLUGIN_SWAPPED=1
 if [ -e "$UNIT_FILE" ]; then mv -- "$UNIT_FILE" "$UNIT_BACKUP"; UNIT_BACKED_UP=1; fi

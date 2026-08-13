@@ -167,7 +167,7 @@ def generated_installer(
         'REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)': f"REPO_DIR={repo!r}",
         '    install -d -o "$2" -g "$3" -m "$4" "$1"': '    mkdir -p -- "$1"\n    chmod "$4" "$1"',
         '    if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c %U "$directory")" != hermes ]; then': '    if [ ! -d "$directory" ] || [ -L "$directory" ]; then',
-        '    [ -z "$(runuser -u hermes -- find "$HERMES_HOME_DISK" -xdev ! -user hermes -print -quit)" ] || return 1': '    : # ownership is asserted through the chown stub in this generated copy',
+        '        test -z "$(find "$4" -xdev ! -user hermes -print -quit)" || exit 1': '        : # ownership is asserted through the chown stub in this generated copy',
         'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ] || [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then': 'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ]; then',
         'in /var/lib/hermes/*) : ;;': f'in {prefix}/var/lib/hermes/*) : ;;',
         '    printf \'%s  %s\\n\' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status': '    : # fake upstream fixture; production digest check is unchanged',
@@ -260,10 +260,23 @@ def test_runtime_paths_match_pinned_installer_contract() -> None:
     assert 'secure_runtime_root "$HERMES_HOME_DISK"' in script
 
 
+def test_root_never_traverses_hermes_owned_runtime_paths() -> None:
+    script = read_asset("deploy/install-on-ubuntu.sh")
+    forbidden = (
+        '[ -f "$executable" ]',
+        '[ -e "$PLUGIN_DEST" ]',
+        '[ -e "$PLUGIN_BACKUP" ]',
+        '[ -f "$PLUGIN_STAGE/xmpp_bridge/__init__.py" ]',
+        'find "$PLUGIN_SOURCE_STAGE/xmpp_bridge"',
+    )
+    assert all(value not in script for value in forbidden)
+    assert "runuser -u hermes -- sh -c" in script
+
+
 @pytest.mark.parametrize(
     ("marker", "old_asset"),
     [
-        ('PLUGIN_BACKED_UP=1; fi', "plugin"),
+        ('PLUGIN_BACKED_UP=1', "plugin"),
         ('UNIT_BACKED_UP=1; fi', "unit"),
     ],
 )
@@ -607,8 +620,7 @@ def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path)
     assert len(recursive_chowns) == 1
     assert "/var/lib/hermes/.xmpp-source." in recursive_chowns[0]
     assert "/var/lib/hermes/.hermes/" not in recursive_chowns[0]
-    assert "runuser -u hermes -- cp " in log
-    assert "runuser -u hermes -- chmod -R go-rwx " in log
+    assert "runuser -u hermes -- sh -c " in log
 
 
 def test_bash_syntax() -> None:
