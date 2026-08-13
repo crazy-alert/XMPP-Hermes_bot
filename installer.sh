@@ -201,7 +201,7 @@ mkdir -- "$TXN_DIR"
 chmod 0700 "$TXN_DIR"
 sync_dir "$ENV_DIR"
 transaction_cleanup() {
-    if [ "${TXN_COMMITTED:-0}" != 1 ] && [ -e "$TXN_DIR/backups.ready" ]; then
+    if [ -e "$TXN_DIR/backups.ready" ] && [ ! -e "$TXN_DIR/.commit" ]; then
         restore_previous_generation
     fi
     clear_transaction
@@ -243,7 +243,6 @@ PASSWORD=''
 touch "$TXN_DIR/.commit"
 sync -f "$TXN_DIR/.commit"
 sync_dir "$TXN_DIR"
-TXN_COMMITTED=1
 
 printf '%s' 'Start Hermes service now? [y/N] ' >&2
 IFS= read -r answer || answer=''

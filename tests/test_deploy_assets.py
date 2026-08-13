@@ -244,6 +244,7 @@ def generated_bootstrap(
     fail_state_commit: bool = False,
     fail_env_backup: bool = False,
     recover_only: bool = False,
+    interrupt_after_commit_marker: str | None = None,
     pause_lock: bool = False,
 ) -> tuple[Path, Path, dict[str, str]]:
     """Generated bootstrap harness; production installer contains no test hooks."""
@@ -299,6 +300,16 @@ flock() { :; }
         target = 'mkdir -- "$TXN_DIR"'
         assert target in source
         source = source.replace(target, 'exit 0 # generated recovery-only run\n' + target, 1)
+    if interrupt_after_commit_marker:
+        target = 'sync_dir "$TXN_DIR"\n\nprintf'
+        assert target in source
+        source = source.replace(
+            target,
+            'sync_dir "$TXN_DIR"\n'
+            f'kill -{interrupt_after_commit_marker} $$ # generated interruption after durable marker\n'
+            '\nprintf',
+            1,
+        )
     script = tmp_path / "bootstrap-under-test.sh"
     script.write_text(source, encoding="utf-8", newline="\n")
     env = os.environ.copy()
@@ -326,8 +337,8 @@ flock() { :; }
             'flock -x 9\nchmod 0600 "$ENV_DIR/.xmpp-config.lock"',
             'flock -x 9\nchmod 0600 "$ENV_DIR/.xmpp-config.lock"\ntouch "$TEST_LOCK_READY"\nwhile [ ! -e "$TEST_LOCK_RELEASE" ]; do sleep 0.05; done',
         ).replace(
-            'TXN_COMMITTED=1',
-            'TXN_COMMITTED=1\nrmdir "$TEST_CONCURRENCY_LOCK" || true',
+            'sync_dir "$TXN_DIR"\n\nprintf',
+            'sync_dir "$TXN_DIR"\nrmdir "$TEST_CONCURRENCY_LOCK" || true\n\nprintf',
         )
         script.write_text(source, encoding="utf-8", newline="\n")
         env.update(
@@ -503,6 +514,34 @@ def test_bootstrap_recovery_preserves_a_durably_committed_new_generation(tmp_pat
     assert state_file.read_text(encoding="utf-8") == '{"version":1,"owners":["new@example.com"]}\n'
     assert not transaction.exists()
     assert not (transaction / "state.old").exists()
+
+
+@pytest.mark.parametrize("interruption", ("HUP", "INT", "TERM"))
+def test_bootstrap_interruption_after_durable_commit_preserves_new_generation(
+    tmp_path: Path, interruption: str,
+) -> None:
+    script, root, env = generated_bootstrap(tmp_path, interrupt_after_commit_marker=interruption)
+    env_file = root / "etc/hermes/hermes.env"
+    state_file = root / "var/lib/hermes/.hermes/xmpp/admin.json"
+    env_file.write_text("old-env\n", encoding="utf-8")
+    state_file.write_text('{"version":1,"owners":["old@example.com"]}\n', encoding="utf-8")
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input=bootstrap_input(), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode != 0, result.stderr
+    written_env = env_file.read_text(encoding="utf-8")
+    assert written_env != "old-env\n"
+    assert "XMPP_JID=\"bot@example.com/Hermes\"\n" in written_env
+    assert "XMPP_ALLOWED_USERS=\"owner@example.com\"\n" in written_env
+    assert "XMPP_PASSWORD=\"secret\"\n" in written_env
+    assert state_file.read_text(encoding="utf-8") == (
+        '{"version":1,"revision":0,"owners":["owner@example.com"],'
+        '"trusted_jids":[],"model":null,"endpoint":null,"token":null}\n'
+    )
+    assert not (root / "etc/hermes/.xmpp-config-transaction").exists()
 
 
 def test_bootstrap_recovery_restores_a_complete_old_generation_after_interruption(tmp_path: Path) -> None:
