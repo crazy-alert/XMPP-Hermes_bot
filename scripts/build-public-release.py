@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -59,6 +59,14 @@ SECRET_PATTERNS = (
 
 class ReleaseError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class VerifiedSource:
+    relative: str
+    identity: tuple[int, int, int, int]
+    data: bytes
+    mode: int
 
 
 def git_tracked_paths(source: Path) -> list[str]:
@@ -125,9 +133,43 @@ def validate_destination(destination: Path) -> None:
         if any(destination.iterdir()):
             raise ReleaseError("destination must be new or empty")
 
+    for parent in destination.parents:
+        if parent.is_symlink():
+            raise ReleaseError("destination parent must not be a symlink")
+        if parent.exists() and not parent.is_dir():
+            raise ReleaseError("destination parent must be a directory")
 
-def validate_source_files(source: Path, paths: list[str], denylist: tuple[str, ...]) -> None:
+
+def _identity(file_stat: os.stat_result) -> tuple[int, int, int, int]:
+    return (file_stat.st_dev, file_stat.st_ino, file_stat.st_size, file_stat.st_mtime_ns)
+
+
+def _open_verified(path: Path, expected: VerifiedSource) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ReleaseError(f"tracked path changed during release build: {expected.relative}") from error
+    try:
+        path_stat = path.lstat()
+        opened_stat = os.fstat(descriptor)
+        if (
+            stat.S_ISLNK(path_stat.st_mode)
+            or not stat.S_ISREG(path_stat.st_mode)
+            or not stat.S_ISREG(opened_stat.st_mode)
+            or _identity(path_stat) != expected.identity
+            or _identity(opened_stat) != expected.identity
+        ):
+            raise ReleaseError(f"tracked path changed during release build: {expected.relative}")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def validate_source_files(source: Path, paths: list[str], denylist: tuple[str, ...]) -> list[VerifiedSource]:
     source = source.resolve()
+    verified: list[VerifiedSource] = []
     for relative in paths:
         path = source / relative
         try:
@@ -138,6 +180,7 @@ def validate_source_files(source: Path, paths: list[str], denylist: tuple[str, .
             raise ReleaseError(f"tracked path is not a regular file: {relative}")
         data = path.read_bytes()
         if b"\0" in data:
+            verified.append(VerifiedSource(relative, _identity(file_stat), data, stat.S_IMODE(file_stat.st_mode)))
             continue
         try:
             text = data.decode("utf-8")
@@ -148,29 +191,75 @@ def validate_source_files(source: Path, paths: list[str], denylist: tuple[str, .
             raise ReleaseError(f"private identifier found in: {relative}")
         if any(pattern.search(text) for pattern in SECRET_PATTERNS):
             raise ReleaseError(f"possible secret found in: {relative}")
+        verified.append(VerifiedSource(relative, _identity(file_stat), data, stat.S_IMODE(file_stat.st_mode)))
+    return verified
 
 
-def copy_release(source: Path, destination: Path, paths: list[str]) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
-    for relative in paths:
-        source_path = source / relative
-        destination_path = destination / relative
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_path, destination_path, follow_symlinks=False)
-        shutil.copymode(source_path, destination_path, follow_symlinks=False)
+def copy_release(source: Path, destination: Path, paths: list[VerifiedSource]) -> None:
+    destination_existed = destination.exists()
+    created_files: list[Path] = []
+    created_dirs: list[Path] = []
+    try:
+        if not destination_existed:
+            destination.mkdir()
+        for verified in paths:
+            source_path = source / verified.relative
+            descriptor = _open_verified(source_path, verified)
+            with os.fdopen(descriptor, "rb") as source_handle:
+                data = source_handle.read()
+            if data != verified.data:
+                raise ReleaseError(f"tracked path changed during release build: {verified.relative}")
+
+            destination_path = destination / verified.relative
+            missing_parents = []
+            parent = destination_path.parent
+            while parent != destination and not parent.exists():
+                missing_parents.append(parent)
+                parent = parent.parent
+            for directory in reversed(missing_parents):
+                directory.mkdir()
+                created_dirs.append(directory)
+            if parent.is_symlink() or not parent.is_dir():
+                raise ReleaseError(f"unsafe destination path: {verified.relative}")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                output = os.open(destination_path, flags, verified.mode)
+            except OSError as error:
+                raise ReleaseError(f"unsafe destination path: {verified.relative}") from error
+            created_files.append(destination_path)
+            with os.fdopen(output, "wb") as destination_handle:
+                destination_handle.write(data)
+            os.chmod(destination_path, verified.mode, follow_symlinks=False)
+    except BaseException:
+        for path in reversed(created_files):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        for path in reversed(created_dirs):
+            try:
+                path.rmdir()
+            except (FileNotFoundError, OSError):
+                pass
+        if not destination_existed:
+            try:
+                destination.rmdir()
+            except (FileNotFoundError, OSError):
+                pass
+        raise
 
 
 def build(source: Path, destination: Path, denylist_file: Path) -> None:
     source = source.resolve()
-    destination = destination.resolve()
+    destination = Path(os.path.abspath(destination))
     if source == destination or source in destination.parents:
         raise ReleaseError("destination must be outside the source worktree")
     validate_destination(destination)
     tracked = git_tracked_paths(source)
     published = classify_paths(tracked)
-    denylist = read_denylist(source, denylist_file.resolve())
-    validate_source_files(source, published, denylist)
-    copy_release(source, destination, published)
+    denylist = read_denylist(source, Path(os.path.abspath(denylist_file)))
+    verified = validate_source_files(source, published, denylist)
+    copy_release(source, destination, verified)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

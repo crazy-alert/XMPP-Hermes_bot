@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import subprocess
@@ -135,6 +136,15 @@ def run_builder(source: Path, destination: Path, denylist: Path | None = None):
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
 
+def load_builder_module():
+    spec = importlib.util.spec_from_file_location("public_release_builder_under_test", BUILDER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def safe_release_files() -> dict[str, str]:
     return {
         ".gitignore": ".superpowers/\n__pycache__/\n",
@@ -232,6 +242,65 @@ def test_builder_rejects_nonempty_destination(tmp_path) -> None:
 
     assert result.returncode != 0
     assert (destination / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize("target_exists", [True, False])
+def test_builder_rejects_existing_or_dangling_destination_symlink_before_write(tmp_path, target_exists) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    target = tmp_path / "external"
+    if target_exists:
+        target.mkdir()
+    destination = tmp_path / "release"
+    try:
+        destination.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+
+    result = run_builder(source, destination, external_denylist(tmp_path))
+
+    assert result.returncode != 0
+    assert destination.is_symlink()
+    if target_exists:
+        assert list(target.iterdir()) == []
+    else:
+        assert not target.exists()
+
+
+def test_builder_rejects_nondirectory_destination_before_write(tmp_path) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    destination = tmp_path / "release"
+    destination.write_text("preserve", encoding="utf-8")
+
+    result = run_builder(source, destination, external_denylist(tmp_path))
+
+    assert result.returncode != 0
+    assert destination.read_text(encoding="utf-8") == "preserve"
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "different_inode"])
+def test_builder_rejects_source_replaced_after_validation_and_cleans_staging(tmp_path, monkeypatch, replacement) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    destination = tmp_path / "release"
+    module = load_builder_module()
+    original_copy = module.copy_release
+
+    def replace_then_copy(source_path, destination_path, files):
+        victim = source_path / "README.md"
+        victim.unlink()
+        if replacement == "symlink":
+            try:
+                victim.symlink_to(source_path / "deploy/hermes.env.example")
+            except OSError as error:
+                pytest.skip(f"symlinks unavailable: {error}")
+        else:
+            victim.write_text("different inode\n", encoding="utf-8")
+        return original_copy(source_path, destination_path, files)
+
+    monkeypatch.setattr(module, "copy_release", replace_then_copy)
+
+    with pytest.raises(module.ReleaseError):
+        module.build(source, destination, external_denylist(tmp_path))
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
