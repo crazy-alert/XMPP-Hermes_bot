@@ -36,7 +36,7 @@ HERMES_HOME_DISK=$(path_at "$HERMES_HOME")
 HERMES_AGENT_DISK=$(path_at "$HERMES_AGENT_DIR")
 HERMES_BIN=$HERMES_AGENT_DIR/venv/bin/hermes
 HERMES_PYTHON=$HERMES_AGENT_DIR/venv/bin/python
-UV_BIN=/var/lib/hermes/.local/bin/uv
+UV_BIN=$HERMES_HOME/bin/uv
 HERMES_BIN_DISK=$(path_at "$HERMES_BIN")
 HERMES_PYTHON_DISK=$(path_at "$HERMES_PYTHON")
 UV_BIN_DISK=$(path_at "$UV_BIN")
@@ -90,6 +90,7 @@ secure_dir() {
     install -d -o "$2" -g "$3" -m "$4" "$1"
 }
 secure_dir "$(path_at /var/lib/hermes)" hermes hermes 0700
+secure_dir "$(path_at /var/lib/hermes/.local)" hermes hermes 0700
 secure_dir "$(path_at /var/lib/hermes/.local/bin)" hermes hermes 0700
 secure_dir "$HERMES_HOME_DISK" hermes hermes 0700
 secure_dir "$(dirname -- "$PLUGIN_DEST")" hermes hermes 0700

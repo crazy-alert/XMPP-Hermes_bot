@@ -125,12 +125,11 @@ while [ "$#" -gt 0 ]; do
   [ "$1" = --dir ] && { install_dir="$2"; shift 2; continue; }
   shift
 done
-mkdir -p "$install_dir/venv/bin" "$HOME/.local/bin"
-printf '#!/bin/sh\\nexec "%s" "$@"\\n' "$install_dir/venv/bin/hermes" >"$HOME/.local/bin/hermes"
+mkdir -p "$install_dir/venv/bin" "$HERMES_HOME/bin"
 printf '#!/bin/sh\\nexit 0\\n' >"$install_dir/venv/bin/hermes"
 printf '#!/bin/sh\\nexit 0\\n' >"$install_dir/venv/bin/python"
-printf '#!/bin/sh\\nexit 0\\n' >"$HOME/.local/bin/uv"
-chmod 700 "$HOME/.local/bin/hermes" "$HOME/.local/bin/uv" "$install_dir/venv/bin/hermes" "$install_dir/venv/bin/python"
+printf '#!/bin/sh\\nexit 0\\n' >"$HERMES_HOME/bin/uv"
+chmod 700 "$HERMES_HOME/bin/uv" "$install_dir/venv/bin/hermes" "$install_dir/venv/bin/python"
 """,
     )
     env = os.environ.copy()
@@ -230,6 +229,12 @@ def test_official_installer_digest_matches_audited_pinned_commit() -> None:
     script = read_asset("deploy/install-on-ubuntu.sh")
     assert "HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb" in script
     assert "INSTALLER_SHA256=45f589461248c7a6ec3aecd7522a69dd49c5c8dbf4798ba1296af5c0c5e7ccd3" in script
+
+
+def test_runtime_paths_match_pinned_installer_contract() -> None:
+    script = read_asset("deploy/install-on-ubuntu.sh")
+    assert "UV_BIN=$HERMES_HOME/bin/uv" in script
+    assert 'secure_dir "$(path_at /var/lib/hermes/.local)" hermes hermes 0700' in script
 
 
 @pytest.mark.parametrize(
