@@ -8,6 +8,7 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "hermes-xmpp"))
 
 from xmpp_bridge.commands import CommandRouter, RestartGateway
+from xmpp_bridge.admin_state import ConfigValidationError
 from xmpp_bridge.models import InboundXmppMessage
 
 
@@ -81,6 +82,15 @@ def test_pending_cancel_expiry_replay_and_restart_placeholder():
     assert router.handle(message(body="/restart")).control_event == RestartGateway()
 
 
+def test_pending_expires_at_exact_sixty_seconds_and_replay_is_unhandled():
+    clock = [0.0]
+    state = State(); router = CommandRouter(state, monotonic=lambda: clock[0])
+    router.handle(message(body="new@example.com")); clock[0] = 60.0
+    assert router.handle(message(body="yes")).handled is False
+    assert "new@example.com" not in state.config.trusted_jids
+    assert router.handle(message(body="yes")).handled is False
+
+
 def test_owner_commands_preserve_last_owner_and_ordinary_text_is_unhandled():
     state, router = State(), CommandRouter(State())
     state = router.state
@@ -90,3 +100,77 @@ def test_owner_commands_preserve_last_owner_and_ordinary_text_is_unhandled():
     assert state.config.owners == frozenset({"second@example.com"})
     assert "последнего" in router.handle(message("second@example.com", "/owner remove second@example.com")).reply
     assert router.handle(message("second@example.com", "please ask new@example.com later")).handled is False
+
+
+@pytest.mark.parametrize("answer", ["да", " YES ", "Y"])
+def test_pending_accepts_all_confirmation_variants(answer):
+    state = State(); router = CommandRouter(state)
+    router.handle(message(body="new@example.com"))
+    assert router.handle(message(body=answer)).reply == "Trusted JID обновлён."
+    assert "new@example.com" in state.config.trusted_jids
+
+
+def test_new_bare_jid_replaces_pending_but_sentence_or_resource_cancels():
+    state = State(); router = CommandRouter(state)
+    router.handle(message(body="first@example.com"))
+    replacement = router.handle(message(body="second@example.com"))
+    assert "second@example.com" in replacement.reply
+    assert router.handle(message(body="yes")).reply == "Trusted JID обновлён."
+    assert "second@example.com" in state.config.trusted_jids and "first@example.com" not in state.config.trusted_jids
+    router.handle(message(body="third@example.com"))
+    assert router.handle(message(body="third@example.com/resource")).reply == "Операция отменена."
+    assert router.handle(message(body="yes")).handled is False
+
+
+def test_pending_stale_check_happens_inside_mutate_snapshot():
+    class RacingState(State):
+        def mutate(self, fn):
+            self.config = replace(self.config, revision=self.config.revision + 1)
+            return super().mutate(fn)
+    state = RacingState(); router = CommandRouter(state)
+    router.handle(message(body="new@example.com"))
+    result = router.handle(message(body="yes"))
+    assert "устарел" in result.reply and "new@example.com" not in state.config.trusted_jids
+
+
+@pytest.mark.parametrize("body", ["/model SET Model-X", "/ENDPOINT set https://llm.example/v1", "/TOKEN SET secret-value"])
+def test_commands_and_subcommands_are_casefolded(body):
+    router = CommandRouter(State())
+    assert router.handle(message(body=body)).handled is True
+
+
+@pytest.mark.parametrize("body", ["/model set " + "x" * 513, "/endpoint set " + "x" * 513, "/token set " + "x" * 513])
+def test_oversize_or_invalid_input_returns_sanitized_reply(body):
+    result = CommandRouter(State()).handle(message(body=body))
+    assert result.reply is not None and body not in result.reply
+
+
+@pytest.mark.parametrize("body", ["user@example.com/resource", "user @example.com", "please user@example.com", "/owner add user@example.com/resource"])
+def test_only_an_entire_strict_bare_jid_is_accepted(body):
+    result = CommandRouter(State()).handle(message(body=body))
+    assert result.handled is False or result.reply == "Команда не выполнена."
+
+
+def test_state_validation_errors_are_sanitized_without_token_or_input():
+    class RejectingState(State):
+        def mutate(self, _fn):
+            raise ConfigValidationError("contains secret-token")
+        def set_token(self, _token):
+            raise ConfigValidationError("contains secret-token")
+    router = CommandRouter(RejectingState())
+    for body in ("/model set secret-token", "/token set secret-token", "/owner add second@example.com"):
+        result = router.handle(message(body=body))
+        assert result.reply == "Команда не выполнена."
+        assert "secret-token" not in repr(result)
+
+
+def test_lists_status_help_unknown_and_doctor_callback_are_safe():
+    state = State(); router = CommandRouter(state, doctor=lambda: "ok")
+    assert "/model" in router.handle(message(body="/help")).reply
+    assert "model=" in router.handle(message(body="/status")).reply
+    assert router.handle(message(body="/config")).handled is True
+    assert "trusted@example.com" in router.handle(message(body="/trust LIST")).reply
+    assert "owner@example.com" in router.handle(message(body="/owner list")).reply
+    assert router.handle(message(body="/doctor")).reply == "ok"
+    assert "Неизвестная" in router.handle(message(body="/wat")).reply
+    assert CommandRouter(state, doctor=lambda: (_ for _ in ()).throw(RuntimeError("secret"))).handle(message(body="/doctor")).reply == "Проверка недоступна."
