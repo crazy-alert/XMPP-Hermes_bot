@@ -91,6 +91,15 @@ def test_pending_expires_at_exact_sixty_seconds_and_replay_is_unhandled():
     assert router.handle(message(body="yes")).handled is False
 
 
+@pytest.mark.parametrize("body", ["x" * 4097, "x" * 4097 + "@example.com"])
+def test_overlong_pending_reply_cancels_and_cannot_be_replayed(body):
+    state = State(); router = CommandRouter(state)
+    router.handle(message(body="new@example.com"))
+    assert router.handle(message(body=body)).reply == "Операция отменена."
+    assert router.handle(message(body="yes")).handled is False
+    assert "new@example.com" not in state.config.trusted_jids
+
+
 def test_owner_commands_preserve_last_owner_and_ordinary_text_is_unhandled():
     state, router = State(), CommandRouter(State())
     state = router.state

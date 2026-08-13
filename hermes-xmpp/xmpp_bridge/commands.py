@@ -60,8 +60,6 @@ class CommandRouter:
         body = message.body.strip()
         if sender not in config.owners | config.trusted_jids:
             return CommandResult(False)
-        if len(body) > MAX_BODY_LENGTH:
-            return CommandResult(True, "Команда слишком длинная.") if sender in config.owners else CommandResult(False)
         if body.casefold() == "ping":
             return CommandResult(True, "pong")
         if sender not in config.owners:
@@ -76,6 +74,8 @@ class CommandRouter:
             except ValueError:
                 return self._confirm(sender, body, pending)
             return self._start_toggle(sender, jid, config)
+        if len(body) > MAX_BODY_LENGTH:
+            return CommandResult(True, "Команда слишком длинная.")
         if not body.startswith("/"):
             return self._start_toggle(sender, body, config)
         return self._command(body, config)
