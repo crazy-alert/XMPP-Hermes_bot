@@ -1,0 +1,92 @@
+# Публичная поставка XMPP Hermes Bot
+
+## Цель
+
+Опубликовать проект в `https://github.com/crazy-alert/XMPP-Hermes_bot` как
+универсальный XMPP platform plugin для Hermes Agent с понятной установкой на
+Ubuntu 24.04+. Публичная версия не должна содержать домены, IP-адреса, JID,
+модельные endpoints или другие сведения конкретной инфраструктуры.
+
+## Публичная конфигурация
+
+Все значения окружения задаются пользователем при установке или позднее через
+`/etc/hermes/hermes.env`. Примеры используют только зарезервированные домены
+`example.com` и `example.net`. Пароли и API-ключи никогда не передаются в
+аргументах команд, не записываются в shell history, репозиторий или журнал.
+
+Минимально настраиваются:
+
+- полный JID бота и resource;
+- список разрешённых bare JID;
+- отображаемый nick;
+- адрес и режим TLS XMPP-сервера, если автообнаружение неприменимо;
+- provider/model и OpenAI-совместимый endpoint при использовании custom provider;
+- XMPP-пароль и provider key через скрытый интерактивный ввод либо ручное
+  редактирование защищённого env-файла.
+
+## Два уровня установки
+
+### Bootstrap installer
+
+Корневой `installer.sh` даёт тот же простой вход, что установщик
+`crazy-alert/XMPP`: пользователь запускает одну команду из README. Bootstrap:
+
+1. проверяет root и Ubuntu 24.04+;
+2. устанавливает минимальные `ca-certificates`, `curl` и `git`;
+3. загружает репозиторий `crazy-alert/XMPP-Hermes_bot` во временный staging;
+4. checkout выполняется по явно заданному tag/commit, а фактический commit
+   сверяется до выполнения кода из checkout;
+5. запускает внутренний reviewed installer из staging;
+6. удаляет staging при завершении.
+
+По умолчанию bootstrap не исполняет произвольное актуальное содержимое `main`.
+Ref разрешено переопределить только явно для разработки. Постоянный checkout
+репозитория на сервере не требуется.
+
+### Транзакционный installer
+
+`deploy/install-on-ubuntu.sh` остаётся единственным компонентом, меняющим
+runtime-состояние. Он создаёт пользователя `hermes`, устанавливает pinned Hermes
+Agent, атомарно размещает plugin и systemd unit, сохраняет существующий env и
+откатывает частичное обновление. Пользовательские каталоги проверяются
+fail-closed: симлинки и неожиданные типы файлов не должны позволять root выйти за
+пределы `/var/lib/hermes`.
+
+Сервис после установки остаётся остановленным до успешных `hermes doctor`,
+`systemd-analyze verify` и заполнения секретов.
+
+## Обновление и повторный запуск
+
+Повторный bootstrap получает новую проверенную версию, но не удаляет:
+
+- `/etc/hermes/hermes.env`;
+- `/var/lib/hermes/.hermes/config.yaml`;
+- память и XMPP room state;
+- существующие ejabberd accounts и rooms.
+
+Plugin и unit заменяются транзакционно. Откат runtime —
+`systemctl disable --now hermes-gateway`; удаление XMPP-аккаунта является
+отдельной явной операцией.
+
+## README
+
+README с первых абзацев объясняет, что проект подключает Hermes Agent к XMPP и
+поддерживает разрешённые DM, приватные MUC, mention/reply routing, раздельные
+сессии и восстановление комнат. Далее идут требования, one-command install,
+интерактивная настройка, настройка модели, запуск, smoke checks, команды Hermes,
+обновление, диагностика, безопасность и откат.
+
+Инструкция не предполагает знакомства с исходным проектом или инфраструктурой
+автора.
+
+## Проверка и публикация
+
+Автотесты проверяют отсутствие приватных значений во всех отслеживаемых текстовых
+файлах, bootstrap ref/commit validation, сохранение секретов и persistent state,
+LF-окончания shell-файлов, повторную установку, rollback и отсутствие запуска до
+конфигурации. На Ubuntu выполняются `bash -n`, `systemd-analyze verify`, installer
+smoke test и service acceptance.
+
+После task review и whole-branch review проект публикуется в
+`crazy-alert/XMPP-Hermes_bot`. В GitHub не отправляются локальные отчёты,
+`__pycache__`, credentials или server-specific acceptance artifacts.
