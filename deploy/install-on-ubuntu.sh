@@ -288,11 +288,13 @@ systemd-analyze verify "$UNIT_STAGE"
 # Preserve env content, reject unsafe file types, and enforce manager-only secrets.
 if [ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; then
     [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] || { printf '%s\n' 'Ошибка: hermes.env должен быть регулярным файлом.' >&2; exit 1; }
-else
+elif [ "${HERMES_DEFER_SERVICE_START:-0}" != 1 ]; then
     cp -- "$SCRIPT_DIR/hermes.env.example" "$ENV_FILE"
 fi
-chown root:root "$ENV_FILE"
-chmod 0600 "$ENV_FILE"
+if [ -e "$ENV_FILE" ]; then
+    chown root:root "$ENV_FILE"
+    chmod 0600 "$ENV_FILE"
+fi
 
 usermod -aG docker hermes
 
@@ -328,7 +330,7 @@ fi
 runuser -u hermes -- rm -rf -- "$PLUGIN_BACKUP"
 rm -f -- "$UNIT_BACKUP"
 TRANSACTION=0
-if confirm_service_start; then
+if [ "${HERMES_DEFER_SERVICE_START:-0}" != 1 ] && confirm_service_start; then
     if ! systemctl enable --now hermes-gateway \
         || ! systemctl is-enabled --quiet hermes-gateway \
         || ! systemctl is-active --quiet hermes-gateway; then

@@ -103,6 +103,10 @@ def test_env_template_has_exact_generic_values() -> None:
         "XMPP_ALLOWED_USERS": "admin@example.com",
         "XMPP_NICK": "Hermes",
         "XMPP_STATE_PATH": "/var/lib/hermes/.hermes/xmpp/rooms.json",
+        "XMPP_HOST": "xmpp.example.com",
+        "XMPP_PORT": "5223",
+        "XMPP_TLS_MODE": "direct",
+        "XMPP_ADMIN_STATE_PATH": "/var/lib/hermes/.hermes/xmpp/admin.json",
     }
 
 

@@ -258,6 +258,10 @@ def test_env_template_and_unit_contract() -> None:
         "XMPP_ALLOWED_USERS": "admin@example.com",
         "XMPP_NICK": "Hermes",
         "XMPP_STATE_PATH": "/var/lib/hermes/.hermes/xmpp/rooms.json",
+        "XMPP_HOST": "xmpp.example.com",
+        "XMPP_PORT": "5223",
+        "XMPP_TLS_MODE": "direct",
+        "XMPP_ADMIN_STATE_PATH": "/var/lib/hermes/.hermes/xmpp/admin.json",
     }
     assert "XMPP_PASSWORD" in "\n".join(comments)
     service = parse_unit()["Service"]
@@ -271,6 +275,28 @@ def test_env_template_and_unit_contract() -> None:
     assert service["Restart"] == "on-failure"
     assert service["RestartSec"] == "5"
     assert service["SupplementaryGroups"] == "docker"
+
+
+def test_minimal_bootstrap_installer_configures_only_xmpp_and_first_owner() -> None:
+    script = read_asset("installer.sh")
+
+    for prompt in (
+        "XMPP host",
+        "XMPP port",
+        "XMPP TLS mode",
+        "Bot full JID with resource",
+        "Bot nick",
+        "XMPP password",
+        "First owner bare JID",
+    ):
+        assert prompt in script
+    for forbidden in ("Model:", "Endpoint:", "API token:", "Trusted JID:"):
+        assert forbidden.casefold() not in script.casefold()
+    assert "read -r -s" in script
+    assert "mktemp" in script and "mv -f" in script and "chmod 0600" in script
+    assert '"$STAGE/deploy/install-on-ubuntu.sh"' in script
+    assert "systemctl disable --now hermes-gateway" in script
+    assert 'version\\\\\\"' in script and 'owners\\\\\\"' in script and 'trusted_jids\\\\\\"' in script
 
 
 def test_shipped_installer_has_no_test_mode_or_fault_hooks() -> None:
