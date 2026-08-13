@@ -89,7 +89,7 @@ class RebootConfirmationState:
     def confirm(
         self,
         owner_bare_jid: str,
-        code: str,
+        code: object,
         *,
         is_dm: bool,
         is_owner: bool,
@@ -100,7 +100,12 @@ class RebootConfirmationState:
             return RebootResult("Подтверждение отклонено.")
         owner = owner_bare_jid.strip().lower()
         pending = self._pending
-        if pending is None or pending.owner != owner or not secrets.compare_digest(pending.code, code):
+        code_is_valid = (
+            isinstance(code, str)
+            and len(code) == 6
+            and all("0" <= character <= "9" for character in code)
+        )
+        if pending is None or pending.owner != owner or not code_is_valid or not secrets.compare_digest(pending.code, code):
             return RebootResult("Подтверждение недействительно или истекло.")
         self._pending = None
         self._cooldown_until = now + self._cooldown_seconds

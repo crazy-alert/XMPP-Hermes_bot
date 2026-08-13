@@ -93,6 +93,17 @@ def test_wrong_owner_and_wrong_code_do_not_leak_or_consume_pending() -> None:
     assert state.confirm("owner@example.com", "123456", is_dm=True, is_owner=True).event is not None
 
 
+@pytest.mark.parametrize("bad_code", ["１２３４５６", "abcdef", "12345", "1234567", 123456, None])
+def test_malformed_code_is_rejected_without_exception_or_consumption(bad_code: object) -> None:
+    state = machine(Clock())
+    state.request("owner@example.com", is_dm=True, is_owner=True)
+    result = state.confirm("owner@example.com", bad_code, is_dm=True, is_owner=True)  # type: ignore[arg-type]
+    assert result.event is None
+    assert "123456" not in result.reply
+    assert bad_code is None or str(bad_code) not in result.reply
+    assert state.status().pending is True
+
+
 def test_expiry_cancel_and_new_request_rules() -> None:
     clock = Clock()
     state = machine(clock, ["123456", "654321", "123456"])
@@ -133,3 +144,21 @@ def test_default_generator_produces_six_numeric_digits() -> None:
     code = result.reply.split("/confirm reboot ", 1)[1].split()[0]
     assert len(code) == 6
     assert code.isascii() and code.isdigit()
+
+
+def test_expiry_and_cooldown_exact_boundaries() -> None:
+    clock = Clock()
+    state = machine(clock, ["123456", "654321"])
+    state.request("owner@example.com", is_dm=True, is_owner=True)
+    clock.now = 159.999
+    assert state.confirm("owner@example.com", "123456", is_dm=True, is_owner=True).event is not None
+    clock.now = 459.998
+    assert "cooldown" in state.request("owner@example.com", is_dm=True, is_owner=True).reply.lower()
+    clock.now = 459.999
+    assert "654321" in state.request("owner@example.com", is_dm=True, is_owner=True).reply
+
+    expiring = machine(clock, ["123456"])
+    expiring.request("owner@example.com", is_dm=True, is_owner=True)
+    clock.now = 520.0
+    assert expiring.confirm("owner@example.com", "123456", is_dm=True, is_owner=True).event is None
+    assert expiring.status().pending is False
