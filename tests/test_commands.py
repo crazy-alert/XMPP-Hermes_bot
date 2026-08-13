@@ -42,6 +42,16 @@ def test_ping_authorized_dm_only_and_denied_or_muc_is_silent():
     assert router.handle(message("owner@example.com", "ping", True)).handled is False
 
 
+def test_pending_owner_ping_cancels_while_other_authorized_pings_stay_pong():
+    state = State(); router = CommandRouter(state)
+    router.handle(message(body="new@example.com"))
+    assert router.handle(message(body="ping")).reply == "Операция отменена."
+    assert router.handle(message(body="yes")).handled is False
+    assert "new@example.com" not in state.config.trusted_jids
+    assert router.handle(message(body="ping")).reply == "pong"
+    assert router.handle(message("trusted@example.com", "ping")).reply == "pong"
+
+
 def test_owner_commands_change_config_without_token_echo():
     state, router = State(), CommandRouter(State())
     state = router.state

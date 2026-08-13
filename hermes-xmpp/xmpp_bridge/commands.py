@@ -60,20 +60,20 @@ class CommandRouter:
         body = message.body.strip()
         if sender not in config.owners | config.trusted_jids:
             return CommandResult(False)
+        if sender in config.owners:
+            pending = self._pending.get(sender)
+            if pending is not None:
+                # A whole, strict bare JID starts a new request instead of being
+                # a confirmation/cancellation reply. Anything else reaches _confirm.
+                try:
+                    jid = self._exact_bare_jid(body)
+                except ValueError:
+                    return self._confirm(sender, body, pending)
+                return self._start_toggle(sender, jid, config)
         if body.casefold() == "ping":
             return CommandResult(True, "pong")
         if sender not in config.owners:
             return CommandResult(False)
-
-        pending = self._pending.get(sender)
-        if pending is not None:
-            # A whole, strict bare JID starts a new request instead of being a
-            # confirmation/cancellation reply.  Anything else reaches _confirm.
-            try:
-                jid = self._exact_bare_jid(body)
-            except ValueError:
-                return self._confirm(sender, body, pending)
-            return self._start_toggle(sender, jid, config)
         if len(body) > MAX_BODY_LENGTH:
             return CommandResult(True, "Команда слишком длинная.")
         if not body.startswith("/"):
