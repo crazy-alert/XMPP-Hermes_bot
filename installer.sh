@@ -34,6 +34,27 @@ done
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] && dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04 || fail 'Ubuntu 24.04 or newer is required'
 
+docker_ready() {
+    command -v docker >/dev/null 2>&1 && getent group docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
+confirm_docker_installation() {
+    [ -t 0 ] || fail 'Docker Engine is unavailable and installation needs interactive confirmation'
+    printf '%s' 'Docker Engine is not ready. Install Ubuntu package docker.io? [y/N] '
+    IFS= read -r answer || fail 'installation cancelled'
+    case "${answer%$'\r'}" in
+        y|Y|yes|YES|Yes|д|Д|да|ДА|Да) ;;
+        *) fail 'Docker installation declined' ;;
+    esac
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends docker.io
+    systemctl enable --now docker
+    docker_ready || fail 'Docker Engine failed the post-installation check'
+}
+
+docker_ready || confirm_docker_installation
+
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates git
 STAGE=$(mktemp -d /tmp/hermes-xmpp.XXXXXX)
@@ -48,10 +69,11 @@ HERMES_DEFER_SERVICE_START=1 bash "$STAGE/deploy/install-on-ubuntu.sh"
 systemctl disable --now hermes-gateway
 
 read_value() {
-    local prompt=$1 value
-    printf '%s' "$prompt"
+    local prompt=$1 destination=$2 value
+    printf '%s' "$prompt" >&2
     IFS= read -r value || fail 'configuration cancelled'
-    printf '%s' "$value"
+    value=${value%$'\r'}
+    printf -v "$destination" '%s' "$value"
 }
 
 validate_host() {
@@ -68,11 +90,13 @@ validate_port() {
 
 validate_full_jid() {
     case "$1" in *['"\\']*) return 1 ;; esac
+    [[ ! "$1" =~ [[:cntrl:]] ]] || return 1
     [ "${#1}" -le 3071 ] && [[ "$1" =~ ^[^@/:[:space:]]+@[^@/:[:space:]]+/[^/[:space:]]+$ ]]
 }
 
 validate_bare_jid() {
     case "$1" in *['"\\']*) return 1 ;; esac
+    [[ ! "$1" =~ [[:cntrl:]] ]] || return 1
     [ "${#1}" -le 3071 ] && [[ "$1" =~ ^[^@/:[:space:]]+@[^@/:[:space:]]+$ ]]
 }
 
@@ -93,33 +117,67 @@ quote_env() {
     printf '"%s"' "$value"
 }
 
-HOST=$(read_value 'XMPP host: ')
+read_value 'XMPP host: ' HOST
 validate_host "$HOST" || fail 'invalid XMPP host'
-PORT=$(read_value 'XMPP port: ')
+read_value 'XMPP port: ' PORT
 validate_port "$PORT" || fail 'invalid XMPP port'
-TLS_MODE=$(read_value 'XMPP TLS mode (direct): ')
+read_value 'XMPP TLS mode (direct): ' TLS_MODE
 [ "$TLS_MODE" = direct ] || fail 'only direct XMPP TLS is supported'
-JID=$(read_value 'Bot full JID with resource: ')
+read_value 'Bot full JID with resource: ' JID
 validate_full_jid "$JID" || fail 'invalid bot JID'
-NICK=$(read_value 'Bot nick: ')
+read_value 'Bot nick: ' NICK
 validate_nick "$NICK" || fail 'invalid bot nick'
-printf '%s' 'XMPP password: '
+printf '%s' 'XMPP password: ' >&2
 IFS= read -r -s PASSWORD || fail 'configuration cancelled'
+PASSWORD=${PASSWORD%$'\r'}
 printf '\n'
 validate_password "$PASSWORD" || fail 'invalid XMPP password'
-OWNER=$(read_value 'First owner bare JID: ')
+read_value 'First owner bare JID: ' OWNER
 validate_bare_jid "$OWNER" || fail 'invalid owner JID'
 
 ENV_DIR=/etc/hermes
 ENV_FILE=$ENV_DIR/hermes.env
 STATE_DIR=/var/lib/hermes/.hermes/xmpp
 STATE_FILE=$STATE_DIR/admin.json
+STATE_BACKUP=$STATE_DIR/.admin.json.installer-backup
 [ -d "$ENV_DIR" ] && [ ! -L "$ENV_DIR" ] || fail 'unsafe environment directory'
 [ ! -e "$ENV_FILE" ] || { [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; } || fail 'unsafe environment file'
 runuser -u hermes -- mkdir -p -- "$STATE_DIR"
 runuser -u hermes -- sh -c '[ ! -e "$1" ] || { test -f "$1" && test ! -L "$1"; }' sh "$STATE_FILE" || fail 'unsafe admin-state file'
 
-ENV_TMP=$(mktemp "$ENV_DIR/.hermes.env.XXXXXX")
+exec 9>"$ENV_DIR/.xmpp-config.lock"
+flock -x 9
+chmod 0600 "$ENV_DIR/.xmpp-config.lock"
+TXN_DIR=$ENV_DIR/.xmpp-config-transaction
+if [ -d "$TXN_DIR" ]; then
+    [ ! -L "$TXN_DIR" ] || fail 'unsafe configuration transaction marker'
+    if [ -e "$TXN_DIR/env.present" ]; then
+        mv -f -- "$TXN_DIR/env.old" "$ENV_FILE"
+    else
+        rm -f -- "$ENV_FILE"
+    fi
+    if [ -e "$TXN_DIR/state.present" ]; then
+        runuser -u hermes -- mv -f -- "$STATE_BACKUP" "$STATE_FILE"
+    else
+        runuser -u hermes -- rm -f -- "$STATE_FILE"
+    fi
+    rm -rf -- "$TXN_DIR"
+fi
+mkdir -- "$TXN_DIR"
+chmod 0700 "$TXN_DIR"
+transaction_cleanup() {
+    if [ "${TXN_COMMITTED:-0}" != 1 ]; then
+        if [ -e "$TXN_DIR/env.present" ]; then mv -f -- "$TXN_DIR/env.old" "$ENV_FILE"; else rm -f -- "$ENV_FILE"; fi
+        if [ -e "$TXN_DIR/state.present" ]; then runuser -u hermes -- mv -f -- "$STATE_BACKUP" "$STATE_FILE"; else runuser -u hermes -- rm -f -- "$STATE_FILE"; fi
+    fi
+    rm -rf -- "$TXN_DIR"
+    cleanup
+}
+trap transaction_cleanup EXIT
+if [ -f "$ENV_FILE" ]; then cp -p -- "$ENV_FILE" "$TXN_DIR/env.old"; touch "$TXN_DIR/env.present"; fi
+if [ -f "$STATE_FILE" ]; then runuser -u hermes -- cp -p -- "$STATE_FILE" "$STATE_BACKUP"; touch "$TXN_DIR/state.present"; fi
+sync -f "$TXN_DIR"
+ENV_TMP=$(mktemp "$TXN_DIR/hermes.env.XXXXXX")
 STATE_TMP=$(runuser -u hermes -- mktemp "$STATE_DIR/.admin.json.XXXXXX")
 chmod 0600 "$ENV_TMP"
 printf 'HERMES_HOME=/var/lib/hermes/.hermes\nXMPP_JID=%s\nXMPP_ALLOWED_USERS=%s\nXMPP_NICK=%s\nXMPP_STATE_PATH=/var/lib/hermes/.hermes/xmpp/rooms.json\nXMPP_HOST=%s\nXMPP_PORT=%s\nXMPP_TLS_MODE=%s\nXMPP_ADMIN_STATE_PATH=/var/lib/hermes/.hermes/xmpp/admin.json\nXMPP_PASSWORD=%s\n' \
@@ -131,8 +189,10 @@ runuser -u hermes -- mv -f "$STATE_TMP" "$STATE_FILE"
 chmod 0600 "$ENV_FILE"
 chown root:root "$ENV_FILE"
 PASSWORD=''
+touch "$TXN_DIR/.commit"
+TXN_COMMITTED=1
 
-printf '%s' 'Start Hermes service now? [y/N] '
+printf '%s' 'Start Hermes service now? [y/N] ' >&2
 IFS= read -r answer || answer=''
 case "${answer%$'\r'}" in
     y|Y|yes|YES|Yes) systemctl enable --now hermes-gateway ;;

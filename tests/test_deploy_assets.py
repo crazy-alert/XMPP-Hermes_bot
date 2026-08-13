@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import json
 import os
 import re
 import shutil
@@ -236,6 +237,101 @@ def run_installer(
     return result, fake_root, env
 
 
+def generated_bootstrap(
+    tmp_path: Path,
+    *,
+    docker_missing: bool = False,
+    fail_state_commit: bool = False,
+    pause_lock: bool = False,
+) -> tuple[Path, Path, dict[str, str]]:
+    """Generated bootstrap harness; production installer contains no test hooks."""
+    fake_root = tmp_path / "bootstrap-root"
+    (fake_root / "etc/hermes").mkdir(parents=True)
+    (fake_root / "var/lib/hermes/.hermes/xmpp").mkdir(parents=True)
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n', encoding="utf-8")
+    log = tmp_path / "bootstrap.log"
+    source = read_asset("installer.sh")
+    prefix = bash_path(fake_root)
+    inner = f'''\
+printf '%s\\n' inner >>{bash_path(log)!r}
+mkdir -p {bash_path(fake_root / 'etc/hermes')!r} {bash_path(fake_root / 'var/lib/hermes/.hermes/xmpp')!r}
+'''
+    prelude = '''\
+id() { [ "${1:-}" = -u ] && { printf '0\\n'; return; }; command id "$@"; }
+apt-get() { :; }
+dpkg() { return 0; }
+docker() { [ "${1:-}" = info ]; }
+getent() { [ "${1:-}:${2:-}" = group:docker ]; }
+git() { case "$*" in *'rev-parse HEAD'*) printf '%s\\n' "$TEST_REF";; esac; }
+systemctl() { printf 'systemctl %s\\n' "$*" >>"$TEST_LOG"; }
+runuser() { shift 3; "$@"; }
+chown() { :; }
+flock() { :; }
+'''
+    source = prelude + source
+    source = source.replace('. /etc/os-release', '. "$TEST_OS_RELEASE"')
+    source = source.replace('apt-get update\napt-get install -y --no-install-recommends ca-certificates git', ':')
+    source = source.replace('    apt-get update\n    apt-get install -y --no-install-recommends docker.io\n    systemctl enable --now docker', '    printf \'docker-install\\n\' >>"$TEST_LOG"')
+    source = source.replace('STAGE=$(mktemp -d /tmp/hermes-xmpp.XXXXXX)', 'STAGE=$TEST_STAGE')
+    for line in (
+        'git init -q "$STAGE"',
+        'git -C "$STAGE" remote add origin "$REPOSITORY"',
+        'git -C "$STAGE" fetch --depth=1 origin "$REF"',
+        'git -C "$STAGE" checkout -q --detach FETCH_HEAD',
+    ):
+        source = source.replace(line, ':')
+    source = source.replace('[ -f "$STAGE/deploy/install-on-ubuntu.sh" ] || fail \'verified checkout has no deployment installer\'', ':')
+    source = source.replace('HERMES_DEFER_SERVICE_START=1 bash "$STAGE/deploy/install-on-ubuntu.sh"', inner)
+    source = source.replace('ENV_DIR=/etc/hermes', f'ENV_DIR={bash_path(fake_root / "etc/hermes")!r}')
+    source = source.replace('STATE_DIR=/var/lib/hermes/.hermes/xmpp', f'STATE_DIR={bash_path(fake_root / "var/lib/hermes/.hermes/xmpp")!r}')
+    if fail_state_commit:
+        target = 'runuser -u hermes -- mv -f "$STATE_TMP" "$STATE_FILE"'
+        assert target in source
+        source = source.replace(target, 'false # generated commit failure', 1)
+    script = tmp_path / "bootstrap-under-test.sh"
+    script.write_text(source, encoding="utf-8", newline="\n")
+    env = os.environ.copy()
+    env.update(TEST_STAGE=bash_path(tmp_path / "stage"), TEST_REF="a" * 40, TEST_LOG=bash_path(log), TEST_OS_RELEASE=bash_path(os_release))
+    if docker_missing:
+        source = script.read_text(encoding="utf-8").replace(
+            '[ -t 0 ] || fail \'Docker Engine is unavailable and installation needs interactive confirmation\'',
+            ':',
+        ).replace(
+            'docker() { [ "${1:-}" = info ]; }',
+            'docker() { [ "${TEST_DOCKER_INSTALLED:-0}" = 1 ]; }',
+        ).replace(
+            'getent() { [ "${1:-}:${2:-}" = group:docker ]; }',
+            'getent() { [ "${TEST_DOCKER_INSTALLED:-0}" = 1 ]; }',
+        ).replace(
+            "printf 'docker-install\\n' >>\"$TEST_LOG\"",
+            "printf 'docker-install\\n' >>\"$TEST_LOG\"; export TEST_DOCKER_INSTALLED=1",
+        )
+        script.write_text(source, encoding="utf-8", newline="\n")
+    if pause_lock:
+        source = script.read_text(encoding="utf-8").replace(
+            'flock() { :; }',
+            'flock() { while ! mkdir "$TEST_CONCURRENCY_LOCK" 2>/dev/null; do sleep 0.05; done; }',
+        ).replace(
+            'flock -x 9\nchmod 0600 "$ENV_DIR/.xmpp-config.lock"',
+            'flock -x 9\nchmod 0600 "$ENV_DIR/.xmpp-config.lock"\ntouch "$TEST_LOCK_READY"\nwhile [ ! -e "$TEST_LOCK_RELEASE" ]; do sleep 0.05; done',
+        ).replace(
+            'TXN_COMMITTED=1',
+            'TXN_COMMITTED=1\nrmdir "$TEST_CONCURRENCY_LOCK" || true',
+        )
+        script.write_text(source, encoding="utf-8", newline="\n")
+        env.update(
+            TEST_CONCURRENCY_LOCK=bash_path(tmp_path / "concurrency.lock"),
+            TEST_LOCK_READY=bash_path(tmp_path / "lock.ready"),
+            TEST_LOCK_RELEASE=bash_path(tmp_path / "lock.release"),
+        )
+    return script, fake_root, env
+
+
+def bootstrap_input(*, owner: str = "owner@example.com", start: str = "n") -> str:
+    return "xmpp.example.com\n5223\ndirect\nbot@example.com/Hermes\nHermes\nsecret\n" + owner + "\n" + start + "\n"
+
+
 def parse_unit() -> configparser.ConfigParser:
     parser = configparser.ConfigParser(interpolation=None, strict=False)
     parser.optionxform = str
@@ -297,6 +393,105 @@ def test_minimal_bootstrap_installer_configures_only_xmpp_and_first_owner() -> N
     assert '"$STAGE/deploy/install-on-ubuntu.sh"' in script
     assert "systemctl disable --now hermes-gateway" in script
     assert 'version\\\\\\"' in script and 'owners\\\\\\"' in script and 'trusted_jids\\\\\\"' in script
+
+
+def test_bootstrap_prompts_for_docker_before_exactly_seven_xmpp_values(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path, docker_missing=True)
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input="y\n" + bootstrap_input(), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    prompts = re.findall(r"(?:Docker Engine is not ready[^\n]*|XMPP host: |XMPP port: |XMPP TLS mode \(direct\): |Bot full JID with resource: |Bot nick: |XMPP password: |First owner bare JID: )", result.stdout + result.stderr)
+    assert prompts == [
+        "Docker Engine is not ready. Install Ubuntu package docker.io? [y/N] ",
+        "XMPP host: ", "XMPP port: ", "XMPP TLS mode (direct): ",
+        "Bot full JID with resource: ", "Bot nick: ", "XMPP password: ", "First owner bare JID: ",
+    ]
+    assert (root / "etc/hermes/hermes.env").is_file()
+    assert (root / "var/lib/hermes/.hermes/xmpp/admin.json").is_file()
+
+
+def test_bootstrap_rejects_control_character_jid_without_replacing_existing_generation(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path)
+    env_file = root / "etc/hermes/hermes.env"
+    state_file = root / "var/lib/hermes/.hermes/xmpp/admin.json"
+    env_file.write_text("old-env\n", encoding="utf-8")
+    state_file.write_text('{"old":true}\n', encoding="utf-8")
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input=bootstrap_input(owner="owner\x01@example.com"), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode != 0
+    assert env_file.read_text(encoding="utf-8") == "old-env\n"
+    assert state_file.read_text(encoding="utf-8") == '{"old":true}\n'
+
+
+def test_bootstrap_restores_both_previous_files_when_state_commit_fails(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path, fail_state_commit=True)
+    env_file = root / "etc/hermes/hermes.env"
+    state_file = root / "var/lib/hermes/.hermes/xmpp/admin.json"
+    env_file.write_text("old-env\n", encoding="utf-8")
+    state_file.write_text('{"version":1,"owners":["old@example.com"]}\n', encoding="utf-8")
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input=bootstrap_input(), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode != 0
+    assert env_file.read_text(encoding="utf-8") == "old-env\n"
+    assert state_file.read_text(encoding="utf-8") == '{"version":1,"owners":["old@example.com"]}\n'
+    assert not (root / "etc/hermes/.xmpp-config-transaction").exists()
+
+
+def test_bootstrap_serializes_the_env_and_admin_state_generation_under_one_lock() -> None:
+    script = read_asset("installer.sh")
+
+    assert 'exec 9>"$ENV_DIR/.xmpp-config.lock"' in script
+    assert "flock -x 9" in script
+    assert "TXN_DIR=$ENV_DIR/.xmpp-config-transaction" in script
+    assert 'mv -f "$ENV_TMP" "$ENV_FILE"' in script
+    assert 'mv -f "$STATE_TMP" "$STATE_FILE"' in script
+    assert 'transaction_cleanup()' in script
+
+
+def test_bootstrap_blocks_a_second_generation_until_the_first_releases_the_lock(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path, pause_lock=True)
+    first = subprocess.Popen(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert first.stdin is not None
+    first.stdin.write(bootstrap_input(owner="first@example.com"))
+    first.stdin.close()
+    ready = tmp_path / "lock.ready"
+    for _ in range(100):
+        if ready.exists():
+            break
+        import time
+        time.sleep(0.02)
+    assert ready.exists()
+
+    second = subprocess.Popen(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert second.stdin is not None
+    second.stdin.write(bootstrap_input(owner="second@example.com"))
+    second.stdin.close()
+    import time
+    time.sleep(0.1)
+    assert second.poll() is None
+    (tmp_path / "lock.release").touch()
+    assert first.wait(timeout=10) == 0, first.stderr.read() if first.stderr else ""
+    assert second.wait(timeout=10) == 0, second.stderr.read() if second.stderr else ""
+    assert 'second@example.com' in (root / "etc/hermes/hermes.env").read_text(encoding="utf-8")
+    assert json.loads((root / "var/lib/hermes/.hermes/xmpp/admin.json").read_text(encoding="utf-8"))["owners"] == ["second@example.com"]
 
 
 def test_shipped_installer_has_no_test_mode_or_fault_hooks() -> None:
