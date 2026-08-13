@@ -20,6 +20,8 @@
 - Сервис работает как `hermes`, остаётся остановленным до настройки секретов и успешной проверки.
 - Shell/deployment assets имеют LF; root traversal через пользовательские каталоги fail-closed для symlink и неожиданных типов.
 - Никакие credentials, server acceptance artifacts, `.superpowers/`, caches или `__pycache__` не публикуются.
+- GitHub publication создаётся в отдельном allowlist staging repository с новой
+  object database и ровно одним root-коммитом; development history не переносится.
 
 ---
 
@@ -199,7 +201,20 @@ On an approved Ubuntu 24.04 VPS, use the published/pinned bootstrap or an equiva
 
 - [ ] **Step 4: Publish intentionally**
 
-Confirm GitHub target ownership/access, configure a repository-scoped remote for `https://github.com/crazy-alert/XMPP-Hermes_bot.git`, push the reviewed branch/history, and verify remote default branch files and commit SHA. Do not force-push or overwrite unrelated remote history without explicit user approval.
+Скопировать только audited allowlist tracked files в новый staging без `.git`,
+инициализировать новый repository, сделать один root-коммит и проверить:
+
+```bash
+git rev-list --count HEAD
+git log --oneline --decorate
+git fsck --full --no-reflogs
+```
+
+Expected: count `1`; object database содержит только новый tree/blob/commit. Затем
+повторить privacy/secret scan и тесты внутри staging, настроить remote только там,
+push в `https://github.com/crazy-alert/XMPP-Hermes_bot.git` и проверить remote SHA/
+default-branch files. Не переносить development `.git`; не force-push и не
+перезаписывать unrelated remote history без явного подтверждения пользователя.
 
 - [ ] **Step 5: Record rollback**
 

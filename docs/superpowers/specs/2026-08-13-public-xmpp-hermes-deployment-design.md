@@ -96,6 +96,10 @@ LF-окончания shell-файлов, повторную установку,
 конфигурации. На Ubuntu выполняются `bash -n`, `systemd-analyze verify`, installer
 smoke test и service acceptance.
 
-После task review и whole-branch review проект публикуется в
+После task review и whole-branch review из allowlist файлов создаётся отдельный
+чистый staging repository с новой Git object database и ровно одним root-коммитом.
+История development repository не переносится и не добавляется как remote. Перед
+push проверяются tracked tree, loose/packed objects, `rev-list --count == 1` и
+повторно выполняется secret/privacy scan. Только этот repository публикуется в
 `crazy-alert/XMPP-Hermes_bot`. В GitHub не отправляются локальные отчёты,
-`__pycache__`, credentials или server-specific acceptance artifacts.
+`.superpowers`, `__pycache__`, credentials или server-specific acceptance artifacts.
