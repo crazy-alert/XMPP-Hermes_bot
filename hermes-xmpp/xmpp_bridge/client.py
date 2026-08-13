@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 from xml.etree import ElementTree as ET
@@ -57,6 +58,9 @@ class HermesXmppClient(ClientXMPP):
         self._on_invite = on_invite
         self._room_nicks: dict[str, str] = {}
         self._reconnect_index = 0
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._intentional_disconnect = False
+        self._sleep = asyncio.sleep
         super().__init__(config.bot_jid, config.password)
 
         # Slixmpp uses enable_starttls; retain the explicit policy name too.
@@ -73,11 +77,45 @@ class HermesXmppClient(ClientXMPP):
         self.add_event_handler("groupchat_presence", self._handle_group_presence)
 
     async def connect_and_wait(self) -> None:
-        result = self.connect(self.config.host, self.config.port)
-        if inspect.isawaitable(result):
-            await result
+        self._intentional_disconnect = False
+        ready = asyncio.get_running_loop().create_future()
+
+        def session_started(_event: object) -> None:
+            if not ready.done():
+                ready.set_result(None)
+
+        def connection_failed(error: object) -> None:
+            if not ready.done():
+                ready.set_exception(ConnectionError(str(error)))
+
+        error_events = ("connection_failed", "failed_auth", "ssl_invalid_chain")
+        self.add_event_handler("session_start", session_started)
+        for event_name in error_events:
+            self.add_event_handler(event_name, connection_failed)
+        try:
+            result = self.connect(self.config.host, self.config.port)
+            if inspect.isawaitable(result):
+                asyncio.ensure_future(result).add_done_callback(
+                    lambda attempt: attempt.exception() if not attempt.cancelled() else None
+                )
+            await ready
+        except BaseException:
+            self.cancel_connection_attempt()
+            raise
+        finally:
+            self.del_event_handler("session_start", session_started)
+            for event_name in error_events:
+                self.del_event_handler(event_name, connection_failed)
 
     async def disconnect(self) -> None:  # type: ignore[override]
+        self._intentional_disconnect = True
+        retry_task = self._reconnect_task
+        self._reconnect_task = None
+        if retry_task is not None and not retry_task.done():
+            retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await retry_task
+        self.cancel_connection_attempt()
         result = super().disconnect()
         if inspect.isawaitable(result):
             await result
@@ -94,19 +132,20 @@ class HermesXmppClient(ClientXMPP):
         actual_nick = JID(result[0]["from"]).resource
         self._room_nicks[room] = actual_nick or self.config.nick
 
-    def send_direct(self, jid: str, body: str) -> list[str]:
+    async def send_direct(self, jid: str, body: str) -> list[str]:
         return self._send_chunks(normalize_bare_jid(jid), body, "chat")
 
-    def send_group(self, room_jid: str, body: str) -> list[str]:
+    async def send_group(self, room_jid: str, body: str) -> list[str]:
         return self._send_chunks(normalize_bare_jid(room_jid), body, "groupchat")
 
-    def set_typing(self, jid: str, is_group: bool, active: bool) -> None:
+    async def set_typing(self, jid: str, is_group: bool, active: bool) -> None:
         message_type = "groupchat" if is_group else "chat"
         stanza = self.make_message(normalize_bare_jid(jid), mtype=message_type)
         stanza["chat_state"] = "composing" if active else "active"
         self.send(stanza)
 
     async def _session_start(self, _event: object) -> None:
+        self._reconnect_index = 0
         self.send_presence()
         roster = self.get_roster()
         if inspect.isawaitable(roster):
@@ -178,12 +217,26 @@ class HermesXmppClient(ClientXMPP):
 
     def connection_lost(self, exception: BaseException | None) -> None:
         super().connection_lost(exception)
-        if self.auto_reconnect:
-            self._connect_loop_wait = self._next_reconnect_delay()
+        if self._intentional_disconnect:
+            return
+        if self._reconnect_task is None or self._reconnect_task.done():
+            self._reconnect_task = asyncio.ensure_future(self._reconnect_after_delay(), loop=self.loop)
+
+    async def _reconnect_after_delay(self) -> None:
+        try:
+            await self._sleep(self._next_reconnect_delay())
+            if self._intentional_disconnect:
+                return
+            result = self.connect(self.config.host, self.config.port)
+            if inspect.isawaitable(result):
+                await result
+        finally:
+            if self._reconnect_task is asyncio.current_task():
+                self._reconnect_task = None
 
     def reschedule_connection_attempt(self):  # type: ignore[override]
         """Use a bounded retry sequence instead of Slixmpp's unbounded backoff."""
-        if self._current_connection_attempt is None:
+        if self._intentional_disconnect or self._current_connection_attempt is None:
             return None
         self._connect_loop_wait = self._next_reconnect_delay()
         self._current_connection_attempt = asyncio.ensure_future(self._connect_loop(), loop=self.loop)

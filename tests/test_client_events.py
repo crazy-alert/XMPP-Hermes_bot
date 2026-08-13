@@ -156,9 +156,6 @@ def test_client_registers_tls_safe_xeps_and_bounded_reconnect_delays(tmp_path):
     assert {"xep_0030", "xep_0045", "xep_0085", "xep_0198", "xep_0249", "xep_0461"} <= set(client.plugin)
     assert client.disable_starttls is False
     assert client.RECONNECT_DELAYS == (1, 2, 5, 10, 30, 60)
-    assert client._next_reconnect_delay() == 1
-    assert client._next_reconnect_delay() == 2
-    assert [client._next_reconnect_delay() for _ in range(5)] == [5, 10, 30, 60, 60]
 
 
 def capture_outbound(client):
@@ -172,7 +169,7 @@ def test_outbound_splits_at_paragraph_or_whitespace_and_returns_stanza_ids(tmp_p
     sent = capture_outbound(client)
     body = "a" * 3499 + "\n\n" + "b" * 20
 
-    ids = client.send_direct("Admin@Aversa.Run/phone", body)
+    ids = asyncio.run(client.send_direct("Admin@Aversa.Run/phone", body))
 
     assert len(ids) == 2
     assert [stanza["id"] for stanza in sent] == ids
@@ -185,7 +182,7 @@ def test_outbound_splits_single_long_unicode_word_and_marks_group_messages(tmp_p
     client = make_client(tmp_path)
     sent = capture_outbound(client)
 
-    ids = client.send_group(ROOM, "я" * 3501)
+    ids = asyncio.run(client.send_group(ROOM, "я" * 3501))
 
     assert len(ids) == 2
     assert [len(stanza["body"]) for stanza in sent] == [3500, 1]
@@ -197,8 +194,11 @@ def test_typing_stanzas_use_chat_states_for_direct_and_group_targets(tmp_path):
     client = make_client(tmp_path)
     sent = capture_outbound(client)
 
-    client.set_typing("admin@aversa.run", False, True)
-    client.set_typing(ROOM, True, False)
+    async def send_states():
+        await client.set_typing("admin@aversa.run", False, True)
+        await client.set_typing(ROOM, True, False)
+
+    asyncio.run(send_states())
 
     assert [(stanza["to"], stanza["type"], stanza["chat_state"]) for stanza in sent] == [
         ("admin@aversa.run", "chat", "composing"),
@@ -206,18 +206,127 @@ def test_typing_stanzas_use_chat_states_for_direct_and_group_targets(tmp_path):
     ]
 
 
-def test_connect_and_disconnect_use_optional_host_and_port_without_logging_password(tmp_path, caplog):
-    client = HermesXmppClient(
-        XmppClientConfig(BOT_JID, "not-a-real-password", "Hermes", RoomState(tmp_path / "rooms.json"), "xmpp.example.test", 5223),
-        lambda event: None,
-        lambda event: None,
-    )
-    connected = []
-    client.connect = lambda host=None, port=None: connected.append((host, port))
-    client.disconnect = lambda: connected.append("disconnected")
+def test_connect_and_wait_waits_for_session_start_not_tcp_future(tmp_path, caplog):
+    async def scenario():
+        client = HermesXmppClient(
+            XmppClientConfig(BOT_JID, "not-a-real-password", "Hermes", RoomState(tmp_path / "rooms.json"), "xmpp.example.test", 5223),
+            lambda event: None,
+            lambda event: None,
+        )
+        connected = []
 
-    asyncio.run(client.connect_and_wait())
-    asyncio.run(client.stop())
+        def connect(host=None, port=None):
+            connected.append((host, port))
+            tcp_connected = asyncio.get_running_loop().create_future()
+            tcp_connected.set_result(None)
+            return tcp_connected
 
-    assert connected == [("xmpp.example.test", 5223), "disconnected"]
+        client.connect = connect
+        client.send_presence = lambda: None
+        client.get_roster = lambda: None
+
+        ready = asyncio.create_task(client.connect_and_wait())
+        await asyncio.sleep(0)
+        assert connected == [("xmpp.example.test", 5223)]
+        assert not ready.done()
+
+        client.event("session_start")
+        await ready
+        await client.stop()
+
+    asyncio.run(scenario())
     assert "not-a-real-password" not in caplog.text
+
+
+def test_connect_and_wait_installs_error_handler_before_connect(tmp_path):
+    async def scenario():
+        client = make_client(tmp_path)
+
+        def connect(host=None, port=None):
+            client.event("connection_failed", OSError("offline"))
+            tcp_connected = asyncio.get_running_loop().create_future()
+            tcp_connected.set_result(None)
+            return tcp_connected
+
+        client.connect = connect
+
+        with pytest.raises(ConnectionError, match="offline"):
+            await client.connect_and_wait()
+
+        await client.stop()
+
+    asyncio.run(scenario())
+
+
+def test_unexpected_connection_lost_schedules_exact_reconnect_sequence_and_resets_after_session(tmp_path):
+    async def scenario():
+        client = make_client(tmp_path)
+        delays = []
+        reconnects = []
+
+        async def controlled_sleep(delay):
+            delays.append(delay)
+
+        def connect(host=None, port=None):
+            reconnects.append((host, port))
+            completed = asyncio.get_running_loop().create_future()
+            completed.set_result(None)
+            return completed
+
+        client._sleep = controlled_sleep
+        client.connect = connect
+        client.send_presence = lambda: None
+        client.get_roster = lambda: None
+
+        for expected_delay in (1, 2, 5, 10, 30, 60, 60):
+            client.connection_lost(ConnectionError("link dropped"))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert delays[-1] == expected_delay
+
+        assert len(reconnects) == 7
+
+        await client.event_async("session_start")
+        client.connection_lost(ConnectionError("link dropped again"))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert delays == [1, 2, 5, 10, 30, 60, 60, 1]
+        assert len(reconnects) == 8
+        await client.stop()
+
+    asyncio.run(scenario())
+
+
+def test_stop_cancels_pending_reconnect_and_intentional_disconnect_never_retries(tmp_path):
+    async def scenario():
+        client = make_client(tmp_path)
+        delays = []
+        reconnects = []
+        release_sleep = asyncio.Event()
+
+        async def blocked_sleep(delay):
+            delays.append(delay)
+            await release_sleep.wait()
+
+        def connect(host=None, port=None):
+            reconnects.append((host, port))
+            return asyncio.get_running_loop().create_future()
+
+        client._sleep = blocked_sleep
+        client.connect = connect
+
+        client.connection_lost(ConnectionError("link dropped"))
+        await asyncio.sleep(0)
+        assert delays == [1]
+
+        await client.stop()
+        release_sleep.set()
+        await asyncio.sleep(0)
+        client.connection_lost(None)
+        await asyncio.sleep(0)
+
+        assert reconnects == []
+        assert delays == [1]
+
+    asyncio.run(scenario())
