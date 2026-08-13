@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -69,6 +71,18 @@ class VerifiedSource:
     mode: int
 
 
+@dataclass
+class BoundDestination:
+    path: Path
+    identity: tuple[int, int, int, int]
+    descriptor: int | None
+    parent_path: Path
+    parent_identity: tuple[int, int]
+    parent_descriptor: int | None
+    created_files: list[Path]
+    created_dirs: list[Path]
+
+
 def git_tracked_paths(source: Path) -> list[str]:
     result = subprocess.run(
         ["git", "ls-files", "-z"],
@@ -125,16 +139,13 @@ def read_denylist(source: Path, path: Path) -> tuple[str, ...]:
 
 
 def validate_destination(destination: Path) -> None:
-    if destination.is_symlink():
+    if destination.is_symlink() or _is_reparse(destination.lstat() if destination.exists() or destination.is_symlink() else None):
         raise ReleaseError("destination must not be a symlink")
     if destination.exists():
-        if not destination.is_dir():
-            raise ReleaseError("destination must be a directory")
-        if any(destination.iterdir()):
-            raise ReleaseError("destination must be new or empty")
+        raise ReleaseError("destination must not already exist")
 
     for parent in destination.parents:
-        if parent.is_symlink():
+        if parent.is_symlink() or _is_reparse(parent.lstat() if parent.exists() or parent.is_symlink() else None):
             raise ReleaseError("destination parent must not be a symlink")
         if parent.exists() and not parent.is_dir():
             raise ReleaseError("destination parent must be a directory")
@@ -142,6 +153,122 @@ def validate_destination(destination: Path) -> None:
 
 def _identity(file_stat: os.stat_result) -> tuple[int, int, int, int]:
     return (file_stat.st_dev, file_stat.st_ino, file_stat.st_size, file_stat.st_mtime_ns)
+
+
+def _stable_identity(file_stat: os.stat_result) -> tuple[int, int]:
+    return (file_stat.st_dev, file_stat.st_ino)
+
+
+def _create_staging(destination: Path) -> BoundDestination:
+    parent = destination.parent
+    parent_stat = parent.lstat()
+    parent_descriptor: int | None = None
+    if os.name != "nt":
+        parent_descriptor = os.open(
+            parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        if _stable_identity(os.fstat(parent_descriptor)) != _stable_identity(parent_stat):
+            os.close(parent_descriptor)
+            raise ReleaseError("destination parent changed during release build")
+    for _ in range(32):
+        staging = parent / f".{destination.name}.staging-{secrets.token_hex(16)}"
+        try:
+            if parent_descriptor is not None:
+                os.mkdir(staging.name, 0o700, dir_fd=parent_descriptor)
+            else:
+                os.mkdir(staging, 0o700)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
+            raise ReleaseError("could not create private release staging directory") from error
+        return _bind_existing_staging(staging, parent, parent_stat, parent_descriptor)
+    if parent_descriptor is not None:
+        os.close(parent_descriptor)
+    raise ReleaseError("could not allocate private release staging directory")
+
+
+def _bind_existing_staging(
+    staging: Path,
+    parent: Path,
+    parent_stat: os.stat_result,
+    parent_descriptor: int | None,
+) -> BoundDestination:
+    descriptor: int | None = None
+    try:
+        file_stat = staging.lstat()
+        if stat.S_ISLNK(file_stat.st_mode) or _is_reparse(file_stat) or not stat.S_ISDIR(file_stat.st_mode):
+            raise ReleaseError("release staging is not a private directory")
+        if os.name != "nt":
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(staging, flags)
+            if _stable_identity(os.fstat(descriptor)) != _stable_identity(file_stat):
+                raise ReleaseError("release staging changed while being created")
+        return BoundDestination(
+            staging,
+            _identity(file_stat),
+            descriptor,
+            parent,
+            _stable_identity(parent_stat),
+            parent_descriptor,
+            [],
+            [],
+        )
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+        try:
+            staging.rmdir()
+        except OSError:
+            pass
+        raise
+
+
+def _check_bound(destination: BoundDestination) -> None:
+    try:
+        parent_stat = destination.parent_path.lstat()
+    except OSError as error:
+        raise ReleaseError("destination parent changed during release build") from error
+    if (
+        stat.S_ISLNK(parent_stat.st_mode)
+        or _is_reparse(parent_stat)
+        or not stat.S_ISDIR(parent_stat.st_mode)
+        or _stable_identity(parent_stat) != destination.parent_identity
+    ):
+        raise ReleaseError("destination parent changed during release build")
+    if destination.parent_descriptor is not None:
+        if _stable_identity(os.fstat(destination.parent_descriptor)) != destination.parent_identity:
+            raise ReleaseError("destination parent binding changed during release build")
+    try:
+        file_stat = destination.path.lstat()
+    except OSError as error:
+        raise ReleaseError("destination changed during release build") from error
+    if (
+        stat.S_ISLNK(file_stat.st_mode)
+        or _is_reparse(file_stat)
+        or not stat.S_ISDIR(file_stat.st_mode)
+        or _stable_identity(file_stat) != _stable_identity_from_tuple(destination.identity)
+    ):
+        raise ReleaseError("destination changed during release build")
+    if destination.descriptor is not None:
+        opened_stat = os.fstat(destination.descriptor)
+        if _stable_identity(opened_stat) != _stable_identity_from_tuple(destination.identity):
+            raise ReleaseError("destination binding changed during release build")
+
+
+def _stable_identity_from_tuple(identity: tuple[int, int, int, int]) -> tuple[int, int]:
+    return identity[0], identity[1]
+
+
+def _is_reparse(file_stat: os.stat_result | None) -> bool:
+    if file_stat is None:
+        return False
+    attributes = getattr(file_stat, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
 def _open_verified(path: Path, expected: VerifiedSource) -> int:
@@ -195,13 +322,8 @@ def validate_source_files(source: Path, paths: list[str], denylist: tuple[str, .
     return verified
 
 
-def copy_release(source: Path, destination: Path, paths: list[VerifiedSource]) -> None:
-    destination_existed = destination.exists()
-    created_files: list[Path] = []
-    created_dirs: list[Path] = []
+def copy_release(source: Path, destination: BoundDestination, paths: list[VerifiedSource]) -> None:
     try:
-        if not destination_existed:
-            destination.mkdir()
         for verified in paths:
             source_path = source / verified.relative
             descriptor = _open_verified(source_path, verified)
@@ -210,43 +332,120 @@ def copy_release(source: Path, destination: Path, paths: list[VerifiedSource]) -
             if data != verified.data:
                 raise ReleaseError(f"tracked path changed during release build: {verified.relative}")
 
-            destination_path = destination / verified.relative
+            _check_bound(destination)
+            destination_path = destination.path / verified.relative
             missing_parents = []
             parent = destination_path.parent
-            while parent != destination and not parent.exists():
+            while parent != destination.path and not parent.exists():
                 missing_parents.append(parent)
                 parent = parent.parent
             for directory in reversed(missing_parents):
                 directory.mkdir()
-                created_dirs.append(directory)
+                destination.created_dirs.append(directory)
+                _check_bound(destination)
             if parent.is_symlink() or not parent.is_dir():
                 raise ReleaseError(f"unsafe destination path: {verified.relative}")
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
             try:
-                output = os.open(destination_path, flags, verified.mode)
+                if destination.descriptor is not None:
+                    output = _open_destination_relative(destination, verified.relative, flags, verified.mode)
+                else:
+                    _check_bound(destination)
+                    output = os.open(destination_path, flags, verified.mode)
+                    _check_bound(destination)
             except OSError as error:
                 raise ReleaseError(f"unsafe destination path: {verified.relative}") from error
-            created_files.append(destination_path)
+            destination.created_files.append(destination_path)
             with os.fdopen(output, "wb") as destination_handle:
                 destination_handle.write(data)
             os.chmod(destination_path, verified.mode, follow_symlinks=False)
-    except BaseException:
-        for path in reversed(created_files):
-            try:
+            _check_bound(destination)
+    except OSError as error:
+        raise ReleaseError("destination changed during release build") from error
+
+
+def _open_destination_relative(destination: BoundDestination, relative: str, flags: int, mode: int) -> int:
+    assert destination.descriptor is not None
+    current = os.dup(destination.descriptor)
+    try:
+        parts = Path(relative).parts
+        for part in parts[:-1]:
+            next_descriptor = os.open(
+                part,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=current,
+            )
+            os.close(current)
+            current = next_descriptor
+        return os.open(parts[-1], flags, mode, dir_fd=current)
+    finally:
+        os.close(current)
+
+
+def _audit_destination(destination: BoundDestination, expected: list[VerifiedSource]) -> None:
+    _check_bound(destination)
+    actual = sorted(
+        path.relative_to(destination.path).as_posix()
+        for path in destination.path.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+    wanted = sorted(item.relative for item in expected)
+    if actual != wanted or any(path.is_symlink() for path in destination.path.rglob("*")):
+        raise ReleaseError("destination tree changed during release build")
+    _check_bound(destination)
+
+
+def _cleanup_destination(destination: BoundDestination) -> None:
+    try:
+        _check_bound(destination)
+    except ReleaseError:
+        return
+    for path in reversed(destination.created_files):
+        try:
+            if not path.is_symlink():
                 path.unlink()
-            except FileNotFoundError:
-                pass
-        for path in reversed(created_dirs):
-            try:
+        except OSError:
+            pass
+    for path in reversed(destination.created_dirs):
+        try:
+            if not path.is_symlink():
                 path.rmdir()
-            except (FileNotFoundError, OSError):
-                pass
-        if not destination_existed:
-            try:
-                destination.rmdir()
-            except (FileNotFoundError, OSError):
-                pass
-        raise
+        except OSError:
+            pass
+    try:
+        _check_bound(destination)
+        destination.path.rmdir()
+    except (OSError, ReleaseError):
+        pass
+
+
+def _publish_destination(destination: BoundDestination, final_path: Path) -> None:
+    _check_bound(destination)
+    if final_path.exists() or final_path.is_symlink():
+        raise ReleaseError("destination appeared during release build")
+    try:
+        if sys.platform.startswith("linux"):
+            if destination.parent_descriptor is None:
+                raise ReleaseError("destination parent is not bound")
+            libc = ctypes.CDLL(None, use_errno=True)
+            renameat2 = libc.renameat2
+            renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+            renameat2.restype = ctypes.c_int
+            result = renameat2(
+                destination.parent_descriptor,
+                os.fsencode(destination.path.name),
+                destination.parent_descriptor,
+                os.fsencode(final_path.name),
+                1,  # RENAME_NOREPLACE
+            )
+            if result != 0:
+                raise OSError(ctypes.get_errno(), "renameat2(RENAME_NOREPLACE) failed")
+        else:
+            destination.path.rename(final_path)
+    except OSError as error:
+        raise ReleaseError("destination appeared during release build") from error
+    destination.path = final_path
+    _check_bound(destination)
 
 
 def build(source: Path, destination: Path, denylist_file: Path) -> None:
@@ -259,7 +458,19 @@ def build(source: Path, destination: Path, denylist_file: Path) -> None:
     published = classify_paths(tracked)
     denylist = read_denylist(source, Path(os.path.abspath(denylist_file)))
     verified = validate_source_files(source, published, denylist)
-    copy_release(source, destination, verified)
+    bound = _create_staging(destination)
+    try:
+        copy_release(source, bound, verified)
+        _audit_destination(bound, verified)
+        _publish_destination(bound, destination)
+    except BaseException:
+        _cleanup_destination(bound)
+        raise
+    finally:
+        if bound.descriptor is not None:
+            os.close(bound.descriptor)
+        if bound.parent_descriptor is not None:
+            os.close(bound.parent_descriptor)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

@@ -244,6 +244,18 @@ def test_builder_rejects_nonempty_destination(tmp_path) -> None:
     assert (destination / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
+def test_builder_rejects_existing_empty_destination(tmp_path) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    destination = tmp_path / "release"
+    destination.mkdir()
+
+    result = run_builder(source, destination, external_denylist(tmp_path))
+
+    assert result.returncode != 0
+    assert destination.is_dir()
+    assert list(destination.iterdir()) == []
+
+
 @pytest.mark.parametrize("target_exists", [True, False])
 def test_builder_rejects_existing_or_dangling_destination_symlink_before_write(tmp_path, target_exists) -> None:
     source = make_release_source(tmp_path, safe_release_files())
@@ -277,6 +289,47 @@ def test_builder_rejects_nondirectory_destination_before_write(tmp_path) -> None
     assert destination.read_text(encoding="utf-8") == "preserve"
 
 
+@pytest.mark.parametrize("attack", ["before_first_write", "mid_tree", "before_publish"])
+def test_builder_destination_swap_or_injection_never_writes_external(tmp_path, monkeypatch, attack) -> None:
+    source = make_release_source(tmp_path, safe_release_files())
+    destination = tmp_path / "release"
+    external = tmp_path / "external"
+    external.mkdir()
+    module = load_builder_module()
+
+    if attack in {"before_first_write", "mid_tree"}:
+        original_open = module.os.open
+        output_opens = 0
+        def attack_open(path, flags, *args, **kwargs):
+            nonlocal output_opens
+            if flags & module.os.O_WRONLY:
+                output_opens += 1
+                threshold = 1 if attack == "before_first_write" else 2
+                if output_opens == threshold:
+                    destination.symlink_to(external, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(module.os, "open", attack_open)
+    else:
+        original_copy = module.copy_release
+
+        def inject_then_return(source_path, staging_path, files):
+            original_copy(source_path, staging_path, files)
+            destination.mkdir()
+            (destination / "unexpected.txt").write_text("injected", encoding="utf-8")
+
+        monkeypatch.setattr(module, "copy_release", inject_then_return)
+
+    with pytest.raises(module.ReleaseError):
+        module.build(source, destination, external_denylist(tmp_path))
+
+    assert list(external.iterdir()) == []
+    if destination.is_symlink():
+        assert destination.resolve() == external.resolve()
+    else:
+        assert (destination / "unexpected.txt").read_text(encoding="utf-8") == "injected"
+
+
 @pytest.mark.parametrize("replacement", ["symlink", "different_inode"])
 def test_builder_rejects_source_replaced_after_validation_and_cleans_staging(tmp_path, monkeypatch, replacement) -> None:
     source = make_release_source(tmp_path, safe_release_files())
@@ -284,7 +337,7 @@ def test_builder_rejects_source_replaced_after_validation_and_cleans_staging(tmp
     module = load_builder_module()
     original_copy = module.copy_release
 
-    def replace_then_copy(source_path, destination_path, files):
+    def replace_then_copy(source_path, bound_destination, files):
         victim = source_path / "README.md"
         victim.unlink()
         if replacement == "symlink":
@@ -294,7 +347,7 @@ def test_builder_rejects_source_replaced_after_validation_and_cleans_staging(tmp
                 pytest.skip(f"symlinks unavailable: {error}")
         else:
             victim.write_text("different inode\n", encoding="utf-8")
-        return original_copy(source_path, destination_path, files)
+        return original_copy(source_path, bound_destination, files)
 
     monkeypatch.setattr(module, "copy_release", replace_then_copy)
 
