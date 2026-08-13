@@ -24,6 +24,13 @@ def bash_path(path: Path) -> str:
     return value
 
 
+def bash_lexical_path(path: Path) -> str:
+    value = str(path.absolute())
+    if os.name == "nt":
+        return f"/{value[0].lower()}{value[2:].replace(chr(92), '/')}"
+    return value
+
+
 def find_bash() -> str:
     found = shutil.which("bash")
     git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
@@ -142,7 +149,13 @@ chmod 700 "$HERMES_HOME/bin/uv" "$install_dir/venv/bin/hermes" "$install_dir/ven
     return fake_root, env
 
 
-def generated_installer(tmp_path: Path, fake_root: Path, *, inject_after: str | None = None) -> Path:
+def generated_installer(
+    tmp_path: Path,
+    fake_root: Path,
+    *,
+    inject_after: str | None = None,
+    race_after: str | None = None,
+) -> Path:
     source = read_asset("deploy/install-on-ubuntu.sh")
     deploy = bash_path(ROOT / "deploy")
     repo = bash_path(ROOT)
@@ -154,7 +167,8 @@ def generated_installer(tmp_path: Path, fake_root: Path, *, inject_after: str | 
         'REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)': f"REPO_DIR={repo!r}",
         '    install -d -o "$2" -g "$3" -m "$4" "$1"': '    mkdir -p -- "$1"\n    chmod "$4" "$1"',
         '    if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c %U "$directory")" != hermes ]; then': '    if [ ! -d "$directory" ] || [ -L "$directory" ]; then',
-        '    [ -z "$(find /var/lib/hermes -xdev ! -user hermes -print -quit)" ] || return 1': '    : # ownership is asserted through the chown stub in this generated copy',
+        '    [ -z "$(runuser -u hermes -- find "$HERMES_HOME_DISK" -xdev ! -user hermes -print -quit)" ] || return 1': '    : # ownership is asserted through the chown stub in this generated copy',
+        'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ] || [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then': 'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ]; then',
         'in /var/lib/hermes/*) : ;;': f'in {prefix}/var/lib/hermes/*) : ;;',
         '    printf \'%s  %s\\n\' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status': '    : # fake upstream fixture; production digest check is unchanged',
     }
@@ -165,6 +179,12 @@ def generated_installer(tmp_path: Path, fake_root: Path, *, inject_after: str | 
         assert inject_after in source
         sentinel = bash_path(tmp_path / "injection-reached")
         source = source.replace(inject_after, inject_after + f"\ntouch {sentinel!r}\nfalse # generated test-only fault", 1)
+    if race_after:
+        assert race_after in source
+        account_home = bash_path(fake_root / "var/lib/hermes")
+        race_link = bash_lexical_path(tmp_path / "race-link")
+        race = f"\nrm -rf -- {account_home!r}\nmv -- {race_link!r} {account_home!r} # generated test-only race"
+        source = source.replace(race_after, race_after + race, 1)
     generated = tmp_path / ("install-fault.sh" if inject_after else "install-under-test.sh")
     generated.write_text(source, encoding="utf-8", newline="\n")
     return generated
@@ -235,8 +255,9 @@ def test_official_installer_digest_matches_audited_pinned_commit() -> None:
 def test_runtime_paths_match_pinned_installer_contract() -> None:
     script = read_asset("deploy/install-on-ubuntu.sh")
     assert "UV_BIN=$HERMES_HOME/bin/uv" in script
-    assert 'secure_hermes_dir "$HERMES_LOCAL_DISK"' in script
-    assert 'chown --no-dereference hermes:hermes "$directory"' in script
+    assert 'secure_dir "$HERMES_ACCOUNT_HOME_DISK" root root 0755' in script
+    assert 'secure_runtime_root "$HERMES_LOCAL_DISK"' in script
+    assert 'secure_runtime_root "$HERMES_HOME_DISK"' in script
 
 
 @pytest.mark.parametrize(
@@ -318,7 +339,7 @@ def test_plugin_copy_is_explicit_allowlist(tmp_path: Path) -> None:
         assert result.returncode == 0, result.stderr
         dest = root / "var/lib/hermes/.hermes/plugins/xmpp-platform"
         assert sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()) == [
-            "adapter.py", "plugin.yaml", "xmpp_bridge/__init__.py", "xmpp_bridge/client.py",
+            "adapter.py", "plugin.yaml", "xmpp_bridge/__init__.py", "xmpp_bridge/admin_state.py", "xmpp_bridge/client.py",
             "xmpp_bridge/models.py", "xmpp_bridge/policy.py", "xmpp_bridge/state.py",
         ]
     finally:
@@ -336,6 +357,69 @@ def test_identity_conflict_fails_before_apt(tmp_path: Path) -> None:
     assert result.returncode != 0
     log_path = tmp_path / "commands.log"
     assert not log_path.exists() or "apt-get" not in log_path.read_text()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "dangling_symlink", "file"])
+def test_unsafe_account_home_fails_before_apt(tmp_path: Path, unsafe_kind: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    account_home = fake_root / "var/lib/hermes"
+    external = tmp_path / "external-account-home"
+    external.mkdir()
+    marker = external / "marker"
+    marker.write_text("unchanged")
+    before_mode = stat.S_IMODE(external.stat().st_mode)
+    try:
+        if unsafe_kind == "symlink":
+            account_home.parent.mkdir(parents=True)
+            account_home.symlink_to(external, target_is_directory=True)
+        elif unsafe_kind == "dangling_symlink":
+            account_home.parent.mkdir(parents=True)
+            account_home.symlink_to(tmp_path / "missing-account-home", target_is_directory=True)
+        else:
+            account_home.parent.mkdir(parents=True)
+            account_home.write_text("not a directory")
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    generated = generated_installer(tmp_path, fake_root)
+    result = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
+
+    assert result.returncode != 0
+    assert marker.read_text() == "unchanged"
+    assert stat.S_IMODE(external.stat().st_mode) == before_mode
+    log_path = tmp_path / "commands.log"
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
+    assert not (fake_root / "etc/hermes/hermes.env").exists()
+    assert not (fake_root / "etc/systemd/system/hermes-gateway.service").exists()
+
+
+def test_account_home_race_cannot_redirect_privileged_metadata_changes(tmp_path: Path) -> None:
+    fake_root, env = build_harness(tmp_path)
+    account_home = fake_root / "var/lib/hermes"
+    account_home.mkdir(parents=True)
+    external = tmp_path / "race-external"
+    external.mkdir()
+    marker = external / "marker"
+    marker.write_text("unchanged")
+    external.chmod(0o755)
+    before_mode = stat.S_IMODE(external.stat().st_mode)
+    try:
+        (tmp_path / "race-link").symlink_to(external, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    generated = generated_installer(
+        tmp_path,
+        fake_root,
+        race_after="apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev",
+    )
+
+    result = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
+
+    assert result.returncode != 0
+    assert marker.read_text() == "unchanged"
+    assert stat.S_IMODE(external.stat().st_mode) == before_mode
+    assert not (fake_root / "etc/hermes/hermes.env").exists()
+    assert not (fake_root / "etc/systemd/system/hermes-gateway.service").exists()
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "file"])
@@ -519,7 +603,12 @@ def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path)
         assert stat.S_IMODE(env_file.stat().st_mode) & 0o077 == 0
     log = Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"]).read_text()
     assert "chown root:root " in log
-    assert "chown -R hermes:hermes " in log
+    recursive_chowns = [line for line in log.splitlines() if line.startswith("chown -R hermes:hermes ")]
+    assert len(recursive_chowns) == 1
+    assert "/var/lib/hermes/.xmpp-source." in recursive_chowns[0]
+    assert "/var/lib/hermes/.hermes/" not in recursive_chowns[0]
+    assert "runuser -u hermes -- cp " in log
+    assert "runuser -u hermes -- chmod -R go-rwx " in log
 
 
 def test_bash_syntax() -> None:

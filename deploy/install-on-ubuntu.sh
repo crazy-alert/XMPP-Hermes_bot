@@ -31,7 +31,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 PLUGIN_SOURCE=$REPO_DIR/hermes-xmpp
 HERMES_HOME=/var/lib/hermes/.hermes
+HERMES_ACCOUNT_HOME=/var/lib/hermes
 HERMES_AGENT_DIR=$HERMES_HOME/hermes-agent
+HERMES_ACCOUNT_HOME_DISK=$(path_at "$HERMES_ACCOUNT_HOME")
 HERMES_HOME_DISK=$(path_at "$HERMES_HOME")
 HERMES_AGENT_DISK=$(path_at "$HERMES_AGENT_DIR")
 HERMES_BIN=$HERMES_AGENT_DIR/venv/bin/hermes
@@ -66,6 +68,17 @@ if ! getent group docker >/dev/null; then
 fi
 
 # Existing identities are validated before apt or any other host mutation.
+reject_unsafe_existing_dir() {
+    directory=$1
+    if [ -e "$directory" ] || [ -L "$directory" ]; then
+        if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+            printf 'Ошибка: путь Hermes должен быть обычным каталогом, а не ссылкой или файлом: %s\n' "$directory" >&2
+            exit 1
+        fi
+    fi
+}
+reject_unsafe_existing_dir "$HERMES_ACCOUNT_HOME_DISK"
+
 if getent group hermes >/dev/null; then
     if ! getent passwd hermes >/dev/null || [ "$(id -gn hermes)" != hermes ]; then
         printf '%s\n' 'Ошибка: существующая группа hermes конфликтует с учётной записью.' >&2
@@ -81,16 +94,8 @@ if getent passwd hermes >/dev/null; then
 fi
 
 HERMES_LOCAL_DISK=$(path_at /var/lib/hermes/.local)
+HERMES_CACHE_DISK=$(path_at /var/lib/hermes/.cache)
 PLUGIN_PARENT=$(dirname -- "$PLUGIN_DEST")
-reject_unsafe_existing_dir() {
-    directory=$1
-    if [ -e "$directory" ] || [ -L "$directory" ]; then
-        if [ ! -d "$directory" ] || [ -L "$directory" ]; then
-            printf 'Ошибка: путь Hermes должен быть обычным каталогом, а не ссылкой или файлом: %s\n' "$directory" >&2
-            exit 1
-        fi
-    fi
-}
 reject_unsafe_existing_file() {
     file=$1
     if [ -e "$file" ] || [ -L "$file" ]; then
@@ -119,26 +124,31 @@ fi
 secure_dir() {
     install -d -o "$2" -g "$3" -m "$4" "$1"
 }
-secure_hermes_dir() {
+secure_runtime_root() {
     directory=$1
-    runuser -u hermes -- mkdir -p -- "$directory"
-    chown --no-dereference hermes:hermes "$directory"
+    secure_dir "$directory" hermes hermes 0700
     if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c %U "$directory")" != hermes ]; then
         printf 'Ошибка: небезопасный каталог Hermes: %s\n' "$directory" >&2
         exit 1
     fi
-    runuser -u hermes -- chmod 0700 -- "$directory"
 }
-secure_dir "$(path_at /var/lib/hermes)" hermes hermes 0700
-secure_hermes_dir "$HERMES_LOCAL_DISK"
-secure_hermes_dir "$(path_at /var/lib/hermes/.local/bin)"
-secure_hermes_dir "$HERMES_HOME_DISK"
-secure_hermes_dir "$PLUGIN_PARENT"
+reject_unsafe_existing_dir "$HERMES_ACCOUNT_HOME_DISK"
+secure_dir "$HERMES_ACCOUNT_HOME_DISK" root root 0755
+if [ -L "$HERMES_ACCOUNT_HOME_DISK" ] || [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then
+    printf '%s\n' 'Ошибка: /var/lib/hermes не является доверенным каталогом root:root 0755.' >&2
+    exit 1
+fi
+secure_runtime_root "$HERMES_LOCAL_DISK"
+secure_runtime_root "$HERMES_HOME_DISK"
+secure_runtime_root "$HERMES_CACHE_DISK"
+runuser -u hermes -- mkdir -p -- "$(path_at /var/lib/hermes/.local/bin)" "$PLUGIN_PARENT"
+runuser -u hermes -- chmod 0700 -- "$(path_at /var/lib/hermes/.local/bin)" "$PLUGIN_PARENT"
 secure_dir "$(dirname -- "$ENV_FILE")" root root 0750
 secure_dir "$(dirname -- "$UNIT_FILE")" root root 0755
 
 INSTALLER_TMP=$(mktemp "$(path_at /var/lib/hermes)/.hermes-installer.XXXXXX")
-PLUGIN_STAGE=$(mktemp -d "$(dirname -- "$PLUGIN_DEST")/.xmpp-platform.stage.XXXXXX")
+PLUGIN_SOURCE_STAGE=$(mktemp -d "$(path_at /var/lib/hermes)/.xmpp-source.XXXXXX")
+PLUGIN_STAGE=$(runuser -u hermes -- mktemp -d "$(dirname -- "$PLUGIN_DEST")/.xmpp-platform.stage.XXXXXX")
 UNIT_STAGE=$(mktemp "$(dirname -- "$UNIT_FILE")/.hermes-gateway.stage.XXXXXX")
 PLUGIN_BACKUP=$PLUGIN_DEST.backup.$$
 UNIT_BACKUP=$UNIT_FILE.backup.$$
@@ -156,13 +166,14 @@ rollback() {
     if [ "$TRANSACTION" = 1 ] && [ "$status" -ne 0 ]; then
         if [ "$UNIT_SWAPPED" = 1 ]; then rm -f -- "$UNIT_FILE"; fi
         if [ "$UNIT_BACKED_UP" = 1 ] && [ -e "$UNIT_BACKUP" ]; then mv -- "$UNIT_BACKUP" "$UNIT_FILE"; fi
-        if [ "$PLUGIN_SWAPPED" = 1 ]; then rm -rf -- "$PLUGIN_DEST"; fi
-        if [ "$PLUGIN_BACKED_UP" = 1 ] && [ -e "$PLUGIN_BACKUP" ]; then mv -- "$PLUGIN_BACKUP" "$PLUGIN_DEST"; fi
+        if [ "$PLUGIN_SWAPPED" = 1 ]; then runuser -u hermes -- rm -rf -- "$PLUGIN_DEST"; fi
+        if [ "$PLUGIN_BACKED_UP" = 1 ] && [ -e "$PLUGIN_BACKUP" ]; then runuser -u hermes -- mv -- "$PLUGIN_BACKUP" "$PLUGIN_DEST"; fi
         systemctl daemon-reload >/dev/null 2>&1 || true
         [ "$WAS_ENABLED" = 0 ] || systemctl enable hermes-gateway >/dev/null 2>&1 || true
         [ "$WAS_ACTIVE" = 0 ] || systemctl start hermes-gateway >/dev/null 2>&1 || true
     fi
-    rm -rf -- "$INSTALLER_TMP" "$PLUGIN_STAGE" "$UNIT_STAGE"
+    rm -rf -- "$INSTALLER_TMP" "$PLUGIN_SOURCE_STAGE" "$UNIT_STAGE"
+    runuser -u hermes -- rm -rf -- "$PLUGIN_STAGE"
     exit "$status"
 }
 trap rollback EXIT
@@ -172,7 +183,7 @@ validate_runtime() {
         [ -f "$executable" ] && [ ! -L "$executable" ] && [ -x "$executable" ] || return 1
     done
     case "$HERMES_BIN_DISK:$HERMES_PYTHON_DISK:$UV_BIN_DISK" in /var/lib/hermes/*) : ;; *) return 1 ;; esac
-    [ -z "$(find /var/lib/hermes -xdev ! -user hermes -print -quit)" ] || return 1
+    [ -z "$(runuser -u hermes -- find "$HERMES_HOME_DISK" -xdev ! -user hermes -print -quit)" ] || return 1
     runuser -u hermes -- "$HERMES_PYTHON_DISK" -c 'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'
     runuser -u hermes -- "$HERMES_BIN_DISK" --version >/dev/null
     runuser -u hermes -- "$UV_BIN_DISK" --version >/dev/null
@@ -192,12 +203,16 @@ fi
 runuser -u hermes -- "$UV_BIN_DISK" pip install --python "$HERMES_PYTHON_DISK" 'slixmpp>=1.12,<2' pytest
 
 # Stage the complete allowlisted plugin before stopping the service.
-cp -- "$PLUGIN_SOURCE/adapter.py" "$PLUGIN_SOURCE/plugin.yaml" "$PLUGIN_STAGE/"
-mkdir -p -- "$PLUGIN_STAGE/xmpp_bridge"
-while IFS= read -r source_file; do cp -- "$source_file" "$PLUGIN_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
+cp -- "$PLUGIN_SOURCE/adapter.py" "$PLUGIN_SOURCE/plugin.yaml" "$PLUGIN_SOURCE_STAGE/"
+mkdir -p -- "$PLUGIN_SOURCE_STAGE/xmpp_bridge"
+while IFS= read -r source_file; do cp -- "$source_file" "$PLUGIN_SOURCE_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
+chown -R hermes:hermes "$PLUGIN_SOURCE_STAGE"
+chmod -R go-rwx "$PLUGIN_SOURCE_STAGE"
+runuser -u hermes -- cp -- "$PLUGIN_SOURCE_STAGE/adapter.py" "$PLUGIN_SOURCE_STAGE/plugin.yaml" "$PLUGIN_STAGE/"
+runuser -u hermes -- mkdir -p -- "$PLUGIN_STAGE/xmpp_bridge"
+while IFS= read -r source_file; do runuser -u hermes -- cp -- "$source_file" "$PLUGIN_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE_STAGE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
 [ -f "$PLUGIN_STAGE/xmpp_bridge/__init__.py" ] || { printf '%s\n' 'Ошибка: отсутствует xmpp_bridge/__init__.py.' >&2; exit 1; }
-chown -R hermes:hermes "$PLUGIN_STAGE"
-chmod -R go-rwx "$PLUGIN_STAGE"
+runuser -u hermes -- chmod -R go-rwx "$PLUGIN_STAGE"
 
 sed "s|^ExecStart=.*|ExecStart=$HERMES_BIN gateway run|" "$SCRIPT_DIR/hermes-gateway.service" >"$UNIT_STAGE"
 chmod 0644 "$UNIT_STAGE"
@@ -219,20 +234,19 @@ systemctl is-enabled --quiet hermes-gateway && WAS_ENABLED=1 || true
 TRANSACTION=1
 if [ "$WAS_ACTIVE" = 1 ]; then systemctl stop hermes-gateway; fi
 
-if [ -e "$PLUGIN_DEST" ]; then mv -- "$PLUGIN_DEST" "$PLUGIN_BACKUP"; PLUGIN_BACKED_UP=1; fi
-mv -- "$PLUGIN_STAGE" "$PLUGIN_DEST"
+if [ -e "$PLUGIN_DEST" ]; then runuser -u hermes -- mv -- "$PLUGIN_DEST" "$PLUGIN_BACKUP"; PLUGIN_BACKED_UP=1; fi
+runuser -u hermes -- mv -- "$PLUGIN_STAGE" "$PLUGIN_DEST"
 PLUGIN_SWAPPED=1
 if [ -e "$UNIT_FILE" ]; then mv -- "$UNIT_FILE" "$UNIT_BACKUP"; UNIT_BACKED_UP=1; fi
 mv -- "$UNIT_STAGE" "$UNIT_FILE"
 UNIT_SWAPPED=1
-chown -R hermes:hermes "$PLUGIN_DEST"
 chown root:root "$UNIT_FILE"
-chmod -R go-rwx "$PLUGIN_DEST"
+runuser -u hermes -- chmod -R go-rwx "$PLUGIN_DEST"
 chmod 0644 "$UNIT_FILE"
 systemctl daemon-reload
 if [ "$WAS_ENABLED" = 1 ]; then systemctl disable hermes-gateway; fi
 
-rm -rf -- "$PLUGIN_BACKUP"
+runuser -u hermes -- rm -rf -- "$PLUGIN_BACKUP"
 rm -f -- "$UNIT_BACKUP"
 TRANSACTION=0
 printf 'Установка Hermes %s завершена. Служба остановлена и отключена.\n' "$HERMES_RELEASE"
