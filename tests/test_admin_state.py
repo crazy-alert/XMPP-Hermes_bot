@@ -4,6 +4,7 @@ import os
 import stat
 import sys
 import threading
+import ctypes
 from pathlib import Path
 
 import pytest
@@ -261,3 +262,27 @@ def test_parent_swap_is_detected_before_state_write(tmp_path, monkeypatch):
         AdminState(path, OWNER).mutate(lambda config: config.with_changes(model="blocked"))
     assert marker.read_text(encoding="utf-8") == "unchanged"
     assert not (external / "admin.json").exists()
+    assert not (external / "admin.json.lock").exists()
+
+
+def test_stale_lock_from_dead_process_is_recovered_but_live_lock_is_not_stolen(tmp_path):
+    path = tmp_path / "admin.json"
+    state = AdminState(path, OWNER)
+    state.load()
+    lock = path.with_suffix(".json.lock")
+    lock.write_text('{"pid":999999999,"nonce":"dead"}\n', encoding="utf-8")
+
+    assert state.mutate(lambda config: config.with_changes(model="recovered")).model == "recovered"
+
+    lock.write_text('{"pid":%d,"nonce":"live"}\n' % os.getpid(), encoding="utf-8")
+    with pytest.raises(AdminStateError, match="lock is busy"):
+        state.mutate(lambda config: config.with_changes(model="must-not-steal"))
+
+
+def test_windows_file_information_abi_is_exact():
+    module = __import__("xmpp_bridge.admin_state", fromlist=["_BY_HANDLE_FILE_INFORMATION"])
+    info = module._BY_HANDLE_FILE_INFORMATION
+
+    assert ctypes.sizeof(info) == 52
+    assert info.dwVolumeSerialNumber.offset == 28
+    assert info.nFileIndexHigh.offset == 44

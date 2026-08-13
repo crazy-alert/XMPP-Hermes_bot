@@ -25,6 +25,25 @@ class ConfigValidationError(AdminStateError):
     """An admin configuration did not satisfy the complete schema."""
 
 
+class _FILETIME(ctypes.Structure):
+    _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+
+
+class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", ctypes.c_uint32),
+        ("ftCreationTime", _FILETIME),
+        ("ftLastAccessTime", _FILETIME),
+        ("ftLastWriteTime", _FILETIME),
+        ("dwVolumeSerialNumber", ctypes.c_uint32),
+        ("nFileSizeHigh", ctypes.c_uint32),
+        ("nFileSizeLow", ctypes.c_uint32),
+        ("nNumberOfLinks", ctypes.c_uint32),
+        ("nFileIndexHigh", ctypes.c_uint32),
+        ("nFileIndexLow", ctypes.c_uint32),
+    ]
+
+
 @dataclass(frozen=True, repr=False)
 class AdminConfig:
     owners: frozenset[str]
@@ -106,7 +125,7 @@ class AdminState:
     def _read(self) -> tuple[AdminConfig, str | None]:
         self._check_parent()
         try:
-            with _open_regular(self.path, os.O_RDONLY) as source:
+            with _open_regular(self.path, os.O_RDONLY, self._binding) as source:
                 payload = json.loads(source.read().decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ConfigValidationError("invalid admin state") from error
@@ -131,7 +150,10 @@ class AdminState:
                 temporary.flush()
                 os.fsync(temporary.fileno())
             self._check_parent()
-            os.replace(temporary_name, self.path)
+            if os.name != "nt" and self._binding is not None:
+                os.replace(Path(temporary_name).name, self.path.name, src_dir_fd=self._binding._dir_fd, dst_dir_fd=self._binding._dir_fd)
+            else:
+                os.replace(temporary_name, self.path)
             temporary_name = None
             self._check_parent()
             if os.name != "nt":
@@ -228,7 +250,7 @@ def _reject_unsafe(path: Path, *, file: bool, allow_missing: bool = False) -> No
 
 
 @contextmanager
-def _open_regular(path: Path, flags: int):
+def _open_regular(path: Path, flags: int, binding: _ParentBinding | None = None):
     """Open a regular non-link file and bind the checked identity to its handle."""
     expected = os.lstat(path)
     if not stat.S_ISREG(expected.st_mode):
@@ -236,7 +258,8 @@ def _open_regular(path: Path, flags: int):
     open_flags = flags
     if hasattr(os, "O_NOFOLLOW"):
         open_flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, open_flags)
+    name, dir_fd = binding.child(path) if os.name != "nt" and binding is not None else (path, None)
+    descriptor = os.open(name, open_flags, dir_fd=dir_fd)
     try:
         actual = os.fstat(descriptor)
         if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino) or not stat.S_ISREG(actual.st_mode):
@@ -271,10 +294,21 @@ class _ParentBinding:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._handle: int | None = None
+        self._dir_fd: int | None = None
         self._identity: tuple[int, int, int] | tuple[int, int] | None = None
 
     def __enter__(self):
         self._handle, self._identity = _open_parent_identity(self.path)
+        if os.name != "nt":
+            flags = os.O_RDONLY | os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            self._dir_fd = os.open(self.path, flags)
+            info = os.fstat(self._dir_fd)
+            if (info.st_dev, info.st_ino) != self._identity:
+                os.close(self._dir_fd)
+                self._dir_fd = None
+                raise AdminStateError("admin state parent changed while binding")
         return self
 
     def check(self) -> None:
@@ -286,9 +320,17 @@ class _ParentBinding:
             _close_parent_handle(handle)
 
     def __exit__(self, *_exc):
+        if self._dir_fd is not None:
+            os.close(self._dir_fd)
+            self._dir_fd = None
         if self._handle is not None:
             _close_parent_handle(self._handle)
             self._handle = None
+
+    def child(self, path: Path) -> tuple[str, int | None]:
+        if path.parent != self.path:
+            raise AdminStateError("state child escapes bound parent")
+        return path.name, self._dir_fd
 
 
 def _open_parent_identity(path: Path) -> tuple[int | None, tuple[int, int, int] | tuple[int, int]]:
@@ -327,14 +369,12 @@ def _win_open_directory(path: Path) -> int:
 
 
 def _win_identity(handle: int) -> tuple[int, int, int]:
-    class INFO(ctypes.Structure):
-        _fields_ = [("attrs", ctypes.c_uint32), ("ctime", ctypes.c_uint64), ("atime", ctypes.c_uint64), ("wtime", ctypes.c_uint64), ("volume", ctypes.c_uint32), ("size_hi", ctypes.c_uint32), ("size_lo", ctypes.c_uint32), ("links", ctypes.c_uint32), ("index_hi", ctypes.c_uint32), ("index_lo", ctypes.c_uint32)]
-    info = INFO()
+    info = _BY_HANDLE_FILE_INFORMATION()
     if not ctypes.windll.kernel32.GetFileInformationByHandle(ctypes.c_void_p(handle), ctypes.byref(info)):
         raise AdminStateError("unable to inspect admin state path")
-    if not info.attrs & 0x10:
+    if not info.dwFileAttributes & 0x10:
         raise AdminStateError("admin state parent is not a directory")
-    return (info.volume, (info.index_hi << 32) | info.index_lo, info.attrs)
+    return (info.dwVolumeSerialNumber, (info.nFileIndexHigh << 32) | info.nFileIndexLow, info.dwFileAttributes)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -356,10 +396,15 @@ def _acquire_lock(lock: Path, binding: _ParentBinding) -> int:
         flags |= os.O_NOFOLLOW
     while True:
         binding.check()
+        # A second lookup catches a deterministic swap immediately after a seam
+        # check before any name-based operation is attempted.
+        binding.check()
         try:
             descriptor = os.open(lock, flags, 0o600)
         except FileExistsError:
             _reject_unsafe(lock, file=True)
+            if _recover_dead_lock(lock, binding):
+                continue
             if time.monotonic() >= deadline:
                 raise AdminStateError("admin state lock is busy")
             time.sleep(0.01)
@@ -368,6 +413,9 @@ def _acquire_lock(lock: Path, binding: _ParentBinding) -> int:
         if not stat.S_ISREG(info.st_mode):
             os.close(descriptor)
             raise AdminStateError("unsafe admin state lock")
+        metadata = json.dumps({"pid": os.getpid(), "nonce": os.urandom(16).hex()}, separators=(",", ":")) + "\n"
+        os.write(descriptor, metadata.encode("utf-8"))
+        os.fsync(descriptor)
         return descriptor
 
 
@@ -378,8 +426,42 @@ def _release_lock(lock: Path, descriptor: int, binding: _ParentBinding) -> None:
         os.close(descriptor)
     try:
         binding.check()
+        binding.check()
         current = lock.stat(follow_symlinks=False)
     except FileNotFoundError:
         return
     if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
         os.unlink(lock)
+
+
+def _recover_dead_lock(lock: Path, binding: _ParentBinding) -> bool:
+    """Remove only a definitely dead, unchanged lock file; unknown locks stay live."""
+    try:
+        original = os.stat(lock, follow_symlinks=False)
+        data = json.loads(lock.read_text(encoding="utf-8"))
+        pid = data.get("pid") if isinstance(data, dict) else None
+        if type(pid) is not int or pid <= 0 or _pid_exists(pid):
+            return False
+        binding.check()
+        binding.check()
+        current = os.stat(lock, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino):
+            return False
+        os.unlink(lock)
+        return True
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _pid_exists(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
