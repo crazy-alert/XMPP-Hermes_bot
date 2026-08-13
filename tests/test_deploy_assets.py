@@ -51,6 +51,7 @@ def build_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     logger = 'printf "%s\\n" "$(basename "$0") $*" >>"$HERMES_TEST_LOG"\n'
     for name in ("apt-get", "groupadd", "useradd", "usermod", "chown"):
         write_executable(bin_dir / name, logger)
+    write_executable(bin_dir / "dpkg", "exit 0\n")
 
     write_executable(
         bin_dir / "getent",
@@ -134,9 +135,6 @@ chmod 700 "$HOME/.local/bin/hermes" "$HOME/.local/bin/uv" "$install_dir/venv/bin
     )
     env = os.environ.copy()
     env.update(
-        HERMES_INSTALL_TEST_MODE="1",
-        HERMES_INSTALL_TEST_ROOT=bash_path(fake_root),
-        HERMES_INSTALL_TEST_BIN=bash_path(bin_dir),
         HERMES_TEST_STATE=bash_path(state),
         HERMES_TEST_LOG=bash_path(tmp_path / "commands.log"),
         HERMES_TEST_UPSTREAM=bash_path(upstream),
@@ -145,12 +143,41 @@ chmod 700 "$HOME/.local/bin/hermes" "$HOME/.local/bin/uv" "$install_dir/venv/bin
     return fake_root, env
 
 
-def run_installer(tmp_path: Path, *, extra: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, str]]:
+def generated_installer(tmp_path: Path, fake_root: Path, *, inject_after: str | None = None) -> Path:
+    source = read_asset("deploy/install-on-ubuntu.sh")
+    deploy = bash_path(ROOT / "deploy")
+    repo = bash_path(ROOT)
+    prefix = bash_path(fake_root)
+    bin_dir = bash_path(tmp_path / "bin")
+    replacements = {
+        'ROOT_PREFIX=""': f'ROOT_PREFIX={prefix!r}\nPATH={bin_dir!r}:$PATH\nexport PATH',
+        'SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)': f"SCRIPT_DIR={deploy!r}",
+        'REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)': f"REPO_DIR={repo!r}",
+        '    install -d -o "$2" -g "$3" -m "$4" "$1"': '    mkdir -p -- "$1"\n    chmod "$4" "$1"',
+        '    [ -z "$(find /var/lib/hermes -xdev ! -user hermes -print -quit)" ] || return 1': '    : # ownership is asserted through the chown stub in this generated copy',
+        'in /var/lib/hermes/*) : ;;': f'in {prefix}/var/lib/hermes/*) : ;;',
+        '    printf \'%s  %s\\n\' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status': '    : # fake upstream fixture; production digest check is unchanged',
+    }
+    for old, new in replacements.items():
+        assert old in source, old
+        source = source.replace(old, new, 1)
+    if inject_after:
+        assert inject_after in source
+        sentinel = bash_path(tmp_path / "injection-reached")
+        source = source.replace(inject_after, inject_after + f"\ntouch {sentinel!r}\nfalse # generated test-only fault", 1)
+    generated = tmp_path / ("install-fault.sh" if inject_after else "install-under-test.sh")
+    generated.write_text(source, encoding="utf-8", newline="\n")
+    return generated
+
+
+def run_installer(tmp_path: Path, *, extra: dict[str, str] | None = None, script: Path | None = None) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, str]]:
     fake_root, env = build_harness(tmp_path)
     if extra:
         env.update(extra)
+    script = script or generated_installer(tmp_path, fake_root)
+    env["TEST_GENERATED_INSTALLER"] = str(script)
     result = subprocess.run(
-        [find_bash(), "deploy/install-on-ubuntu.sh"], cwd=ROOT, env=env,
+        [find_bash(), str(script)], cwd=ROOT, env=env,
         text=True, capture_output=True, check=False,
     )
     return result, fake_root, env
@@ -193,6 +220,38 @@ def test_env_template_and_unit_contract() -> None:
     assert service["SupplementaryGroups"] == "docker"
 
 
+def test_shipped_installer_has_no_test_mode_or_fault_hooks() -> None:
+    script = read_asset("deploy/install-on-ubuntu.sh")
+    assert "HERMES_INSTALL_TEST" not in script
+    assert "HERMES_TEST_FAIL" not in script
+
+
+@pytest.mark.parametrize(
+    ("marker", "old_asset"),
+    [
+        ('PLUGIN_BACKED_UP=1; fi', "plugin"),
+        ('UNIT_BACKED_UP=1; fi', "unit"),
+    ],
+)
+def test_failure_after_backup_rename_restores_old_asset_and_service_state(tmp_path: Path, marker: str, old_asset: str) -> None:
+    installed, root, env = run_installer(tmp_path)
+    assert installed.returncode == 0, installed.stderr
+    plugin = root / "var/lib/hermes/.hermes/plugins/xmpp-platform"
+    (plugin / "marker").write_text("old")
+    unit = root / "etc/systemd/system/hermes-gateway.service"
+    old_unit = unit.read_text()
+    state = Path(env["HERMES_TEST_STATE"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_STATE"])
+    (state / "active").touch()
+    (state / "enabled").touch()
+    generated = generated_installer(tmp_path, root, inject_after=marker)
+    failed = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
+    assert failed.returncode != 0
+    assert (tmp_path / "injection-reached").exists()
+    assert (plugin / "marker").read_text() == "old", old_asset
+    assert unit.read_text() == old_unit
+    assert (state / "active").exists() and (state / "enabled").exists()
+
+
 def test_first_install_accepts_official_wrapper_and_uses_managed_venv(tmp_path: Path) -> None:
     result, root, env = run_installer(tmp_path)
     assert result.returncode == 0, result.stderr
@@ -210,14 +269,14 @@ def test_rerun_skips_runtime_installer_and_preserves_env(tmp_path: Path) -> None
     env_file = root / "etc/hermes/hermes.env"
     env_file.write_text("XMPP_PASSWORD=kept\n")
     Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"]).write_text("")
-    second = subprocess.run([find_bash(), "deploy/install-on-ubuntu.sh"], cwd=ROOT, env=env, text=True, capture_output=True)
+    second = subprocess.run([find_bash(), env["TEST_GENERATED_INSTALLER"]], cwd=ROOT, env=env, text=True, capture_output=True)
     assert second.returncode == 0, second.stderr
     assert env_file.read_text() == "XMPP_PASSWORD=kept\n"
     log = Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"]).read_text()
     assert not any(line.startswith("curl ") for line in log.splitlines())
 
 
-@pytest.mark.parametrize("failure", ["HERMES_TEST_FAIL_VERIFY", "HERMES_TEST_FAIL_STOP", "HERMES_TEST_FAIL_COPY"])
+@pytest.mark.parametrize("failure", ["HERMES_TEST_FAIL_VERIFY", "HERMES_TEST_FAIL_STOP"])
 def test_failed_verify_or_stop_keeps_old_deployment_and_service_state(tmp_path: Path, failure: str) -> None:
     result, root, env = run_installer(tmp_path)
     assert result.returncode == 0, result.stderr
@@ -229,7 +288,7 @@ def test_failed_verify_or_stop_keeps_old_deployment_and_service_state(tmp_path: 
     (state / "active").touch()
     (state / "enabled").touch()
     env[failure] = "1"
-    failed = subprocess.run([find_bash(), "deploy/install-on-ubuntu.sh"], cwd=ROOT, env=env, text=True, capture_output=True)
+    failed = subprocess.run([find_bash(), env["TEST_GENERATED_INSTALLER"]], cwd=ROOT, env=env, text=True, capture_output=True)
     assert failed.returncode != 0
     assert (plugin / "marker").read_text() == "old"
     assert unit.read_text() == old_unit
@@ -259,7 +318,8 @@ def test_identity_conflict_fails_before_apt(tmp_path: Path) -> None:
     (state / "group").touch()
     (state / "user").touch()
     env["HERMES_TEST_IDENTITY_CONFLICT"] = "1"
-    result = subprocess.run([find_bash(), "deploy/install-on-ubuntu.sh"], cwd=ROOT, env=env, text=True, capture_output=True)
+    generated = generated_installer(tmp_path, fake_root)
+    result = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
     assert result.returncode != 0
     log_path = tmp_path / "commands.log"
     assert not log_path.exists() or "apt-get" not in log_path.read_text()

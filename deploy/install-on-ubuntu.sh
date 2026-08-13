@@ -1,21 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-TEST_MODE=${HERMES_INSTALL_TEST_MODE:-0}
 ROOT_PREFIX=""
-if [ "$TEST_MODE" = 1 ]; then
-    ROOT_PREFIX=${HERMES_INSTALL_TEST_ROOT:?HERMES_INSTALL_TEST_ROOT is required in test mode}
-    TEST_BIN=${HERMES_INSTALL_TEST_BIN:?HERMES_INSTALL_TEST_BIN is required in test mode}
-    case "$ROOT_PREFIX:$TEST_BIN" in
-        /:*|*:*:) printf '%s\n' 'Unsafe installer test configuration.' >&2; exit 2 ;;
-    esac
-    PATH="$TEST_BIN:/usr/bin:/bin"
-    export PATH
-    for command_name in apt-get groupadd useradd usermod getent runuser curl chown systemctl systemd-analyze; do
-        command_path=$(command -v "$command_name" || true)
-        case "$command_path" in "$TEST_BIN"/*) : ;; *) printf 'Unsafe test command: %s\n' "$command_name" >&2; exit 2 ;; esac
-    done
-elif [ "$(id -u)" -ne 0 ]; then
+if [ "$(id -u)" -ne 0 ]; then
     printf '%s\n' 'Ошибка: запустите установщик от root.' >&2
     exit 1
 fi
@@ -35,7 +22,7 @@ if [ "${ID:-}" != ubuntu ]; then
     printf '%s\n' 'Ошибка: требуется Ubuntu 24.04 или новее.' >&2
     exit 1
 fi
-if [ "$TEST_MODE" != 1 ] && ! dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04; then
+if ! dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04; then
     printf '%s\n' 'Ошибка: требуется Ubuntu 24.04 или новее.' >&2
     exit 1
 fi
@@ -100,7 +87,7 @@ if ! getent passwd hermes >/dev/null; then
 fi
 
 secure_dir() {
-    if [ "$TEST_MODE" = 1 ]; then mkdir -p -- "$1"; chmod "$4" "$1"; else install -d -o "$2" -g "$3" -m "$4" "$1"; fi
+    install -d -o "$2" -g "$3" -m "$4" "$1"
 }
 secure_dir "$(path_at /var/lib/hermes)" hermes hermes 0700
 secure_dir "$(path_at /var/lib/hermes/.local/bin)" hermes hermes 0700
@@ -116,6 +103,8 @@ PLUGIN_BACKUP=$PLUGIN_DEST.backup.$$
 UNIT_BACKUP=$UNIT_FILE.backup.$$
 PLUGIN_SWAPPED=0
 UNIT_SWAPPED=0
+PLUGIN_BACKED_UP=0
+UNIT_BACKED_UP=0
 TRANSACTION=0
 WAS_ACTIVE=0
 WAS_ENABLED=0
@@ -124,8 +113,10 @@ rollback() {
     status=$?
     trap - EXIT
     if [ "$TRANSACTION" = 1 ] && [ "$status" -ne 0 ]; then
-        if [ "$UNIT_SWAPPED" = 1 ]; then rm -f -- "$UNIT_FILE"; [ ! -e "$UNIT_BACKUP" ] || mv -- "$UNIT_BACKUP" "$UNIT_FILE"; fi
-        if [ "$PLUGIN_SWAPPED" = 1 ]; then rm -rf -- "$PLUGIN_DEST"; [ ! -e "$PLUGIN_BACKUP" ] || mv -- "$PLUGIN_BACKUP" "$PLUGIN_DEST"; fi
+        if [ "$UNIT_SWAPPED" = 1 ]; then rm -f -- "$UNIT_FILE"; fi
+        if [ "$UNIT_BACKED_UP" = 1 ] && [ -e "$UNIT_BACKUP" ]; then mv -- "$UNIT_BACKUP" "$UNIT_FILE"; fi
+        if [ "$PLUGIN_SWAPPED" = 1 ]; then rm -rf -- "$PLUGIN_DEST"; fi
+        if [ "$PLUGIN_BACKED_UP" = 1 ] && [ -e "$PLUGIN_BACKUP" ]; then mv -- "$PLUGIN_BACKUP" "$PLUGIN_DEST"; fi
         systemctl daemon-reload >/dev/null 2>&1 || true
         [ "$WAS_ENABLED" = 0 ] || systemctl enable hermes-gateway >/dev/null 2>&1 || true
         [ "$WAS_ACTIVE" = 0 ] || systemctl start hermes-gateway >/dev/null 2>&1 || true
@@ -139,10 +130,8 @@ validate_runtime() {
     for executable in "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK"; do
         [ -f "$executable" ] && [ ! -L "$executable" ] && [ -x "$executable" ] || return 1
     done
-    case "$HERMES_BIN_DISK:$HERMES_PYTHON_DISK:$UV_BIN_DISK" in "$ROOT_PREFIX"/var/lib/hermes/*) : ;; *) return 1 ;; esac
-    if [ "$TEST_MODE" != 1 ]; then
-        [ -z "$(find "$(path_at /var/lib/hermes)" -xdev ! -user hermes -print -quit)" ] || return 1
-    fi
+    case "$HERMES_BIN_DISK:$HERMES_PYTHON_DISK:$UV_BIN_DISK" in /var/lib/hermes/*) : ;; *) return 1 ;; esac
+    [ -z "$(find /var/lib/hermes -xdev ! -user hermes -print -quit)" ] || return 1
     "$HERMES_PYTHON_DISK" -c 'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'
     "$HERMES_BIN_DISK" --version >/dev/null
     "$UV_BIN_DISK" --version >/dev/null
@@ -151,10 +140,8 @@ validate_runtime() {
 # Runtime installation is separate and idempotent. Docker access is granted only after validation.
 if ! validate_runtime; then
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$OFFICIAL_INSTALLER_URL" --output "$INSTALLER_TMP"
-    if [ "$TEST_MODE" != 1 ]; then
-        printf '%s  %s\n' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status
-        chown hermes:hermes "$INSTALLER_TMP"
-    fi
+    printf '%s  %s\n' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status
+    chown hermes:hermes "$INSTALLER_TMP"
     chmod 0700 "$INSTALLER_TMP"
     runuser -u hermes -- env HOME="$(path_at /var/lib/hermes)" HERMES_HOME="$HERMES_HOME_DISK" \
         bash "$INSTALLER_TMP" --skip-setup --skip-browser --dir "$HERMES_AGENT_DISK" \
@@ -168,7 +155,7 @@ cp -- "$PLUGIN_SOURCE/adapter.py" "$PLUGIN_SOURCE/plugin.yaml" "$PLUGIN_STAGE/"
 mkdir -p -- "$PLUGIN_STAGE/xmpp_bridge"
 while IFS= read -r source_file; do cp -- "$source_file" "$PLUGIN_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
 [ -f "$PLUGIN_STAGE/xmpp_bridge/__init__.py" ] || { printf '%s\n' 'Ошибка: отсутствует xmpp_bridge/__init__.py.' >&2; exit 1; }
-if [ "$TEST_MODE" != 1 ]; then chown -R hermes:hermes "$PLUGIN_STAGE"; fi
+chown -R hermes:hermes "$PLUGIN_STAGE"
 chmod -R go-rwx "$PLUGIN_STAGE"
 
 sed "s|^ExecStart=.*|ExecStart=$HERMES_BIN gateway run|" "$SCRIPT_DIR/hermes-gateway.service" >"$UNIT_STAGE"
@@ -191,11 +178,10 @@ systemctl is-enabled --quiet hermes-gateway && WAS_ENABLED=1 || true
 TRANSACTION=1
 if [ "$WAS_ACTIVE" = 1 ]; then systemctl stop hermes-gateway; fi
 
-if [ -e "$PLUGIN_DEST" ]; then mv -- "$PLUGIN_DEST" "$PLUGIN_BACKUP"; fi
+if [ -e "$PLUGIN_DEST" ]; then mv -- "$PLUGIN_DEST" "$PLUGIN_BACKUP"; PLUGIN_BACKED_UP=1; fi
 mv -- "$PLUGIN_STAGE" "$PLUGIN_DEST"
 PLUGIN_SWAPPED=1
-if [ "${HERMES_TEST_FAIL_COPY:-0}" = 1 ]; then false; fi
-if [ -e "$UNIT_FILE" ]; then mv -- "$UNIT_FILE" "$UNIT_BACKUP"; fi
+if [ -e "$UNIT_FILE" ]; then mv -- "$UNIT_FILE" "$UNIT_BACKUP"; UNIT_BACKED_UP=1; fi
 mv -- "$UNIT_STAGE" "$UNIT_FILE"
 UNIT_SWAPPED=1
 chown -R hermes:hermes "$PLUGIN_DEST"
