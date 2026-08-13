@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_ROOT_FILES = frozenset(
-    {".gitattributes", ".gitignore", "DESIGN.md", "IMPLEMENTATION_PLAN.md", "README.md"}
+    {".gitattributes", ".gitignore", "AGENTS.md", "DESIGN.md", "IMPLEMENTATION_PLAN.md", "README.md"}
 )
 PUBLIC_DIRECTORIES = ("deploy/", "docs/", "hermes-xmpp/", "tests/")
 DEVELOPMENT_DIRECTORIES = (".superpowers/",)
