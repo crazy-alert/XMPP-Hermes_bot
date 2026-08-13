@@ -30,6 +30,9 @@ def normalize_bare_jid(value: str) -> str:
     candidate = value.strip()
     if not candidate:
         raise ValueError("JID must not be empty")
+    raw_bare = candidate.split("/", 1)[0]
+    if not _is_valid_bare_jid(raw_bare):
+        raise ValueError("JID must contain a localpart and domain")
 
     try:
         from slixmpp import JID

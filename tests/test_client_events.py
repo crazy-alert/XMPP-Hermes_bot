@@ -47,6 +47,8 @@ def group_stanza(*, sender="private@conference.aversa.run/Admin", body="hello", 
     stanza["to"] = BOT_JID
     stanza["body"] = body
     stanza["id"] = message_id
+    muc_user = ET.SubElement(stanza.xml, "{http://jabber.org/protocol/muc#user}x")
+    ET.SubElement(muc_user, "{http://jabber.org/protocol/muc#user}item", {"jid": "Admin@Aversa.Run/phone"})
     if delayed:
         ET.SubElement(stanza.xml, "{urn:xmpp:delay}delay", {"stamp": "2026-08-12T00:00:00Z"})
     return stanza
@@ -59,7 +61,7 @@ def test_direct_message_translates_real_synthetic_stanza_to_model(tmp_path):
     client._handle_direct_message(direct_stanza(reply_id="previous-7"))
 
     assert received == [
-        InboundXmppMessage("dm-1", BOT_BARE, "admin@aversa.run", "Admin", "hello", False, "previous-7")
+        InboundXmppMessage("dm-1", BOT_BARE, "admin@aversa.run", "admin", "hello", False, "previous-7")
     ]
 
 
@@ -131,8 +133,7 @@ def test_invites_extract_addresses_from_extensions_before_any_join_or_state(tmp_
     assert received == [expected]
 
 
-@pytest.mark.asyncio
-async def test_session_start_rejoins_saved_rooms_without_history(tmp_path):
+def test_session_start_rejoins_saved_rooms_without_history(tmp_path):
     state = RoomState(tmp_path / "rooms.json")
     state.add(ROOM)
     client = HermesXmppClient(XmppClientConfig(BOT_JID, "not-a-real-password", "Hermes", state), lambda event: None, lambda event: None)
@@ -144,7 +145,7 @@ async def test_session_start_rejoins_saved_rooms_without_history(tmp_path):
         joined.append((room_jid, 0))
 
     client.join_room = join
-    await client._session_start(None)
+    asyncio.run(client._session_start(None))
 
     assert joined == ["presence", "roster", (ROOM, 0)]
 
@@ -205,8 +206,7 @@ def test_typing_stanzas_use_chat_states_for_direct_and_group_targets(tmp_path):
     ]
 
 
-@pytest.mark.asyncio
-async def test_connect_and_disconnect_use_optional_host_and_port_without_logging_password(tmp_path, caplog):
+def test_connect_and_disconnect_use_optional_host_and_port_without_logging_password(tmp_path, caplog):
     client = HermesXmppClient(
         XmppClientConfig(BOT_JID, "not-a-real-password", "Hermes", RoomState(tmp_path / "rooms.json"), "xmpp.example.test", 5223),
         lambda event: None,
@@ -216,8 +216,8 @@ async def test_connect_and_disconnect_use_optional_host_and_port_without_logging
     client.connect = lambda host=None, port=None: connected.append((host, port))
     client.disconnect = lambda: connected.append("disconnected")
 
-    await client.connect_and_wait()
-    await client.stop()
+    asyncio.run(client.connect_and_wait())
+    asyncio.run(client.stop())
 
     assert connected == [("xmpp.example.test", 5223), "disconnected"]
     assert "not-a-real-password" not in caplog.text
