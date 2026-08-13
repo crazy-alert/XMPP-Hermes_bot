@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ctypes
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
+import threading
+import time
 from urllib.parse import urlparse
 
 from .policy import normalize_bare_jid
@@ -56,6 +60,7 @@ class AdminState:
     def __init__(self, path: Path, first_owner: str) -> None:
         self.path = Path(path)
         self._first_owner = normalize_bare_jid(first_owner)
+        self._binding: _ParentBinding | None = None
 
     def load(self) -> AdminConfig:
         with self._locked():
@@ -99,9 +104,10 @@ class AdminState:
         return self._read()
 
     def _read(self) -> tuple[AdminConfig, str | None]:
-        _reject_unsafe(self.path, file=True)
+        self._check_parent()
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            with _open_regular(self.path, os.O_RDONLY) as source:
+                payload = json.loads(source.read().decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ConfigValidationError("invalid admin state") from error
         return _validate(payload)
@@ -112,6 +118,7 @@ class AdminState:
     def _write(self, config: AdminConfig, token: str | None) -> None:
         parent = self.path.parent
         _ensure_safe_parent(parent)
+        self._check_parent()
         _reject_unsafe(self.path, file=True, allow_missing=True)
         contents = json.dumps(_payload(config, token, config.revision), separators=(",", ":"), ensure_ascii=False) + "\n"
         temporary_name: str | None = None
@@ -123,8 +130,10 @@ class AdminState:
                 temporary.write(contents)
                 temporary.flush()
                 os.fsync(temporary.fileno())
+            self._check_parent()
             os.replace(temporary_name, self.path)
             temporary_name = None
+            self._check_parent()
             if os.name != "nt":
                 os.chmod(self.path, 0o600)
                 _fsync_dir(parent)
@@ -139,16 +148,18 @@ class AdminState:
     def _locked(self):
         lock = self.path.with_suffix(self.path.suffix + ".lock")
         _ensure_safe_parent(lock.parent)
-        _reject_unsafe(lock, file=True, allow_missing=True)
-        with lock.open("a+b") as handle:
-            if os.name != "nt":
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        with _ParentBinding(lock.parent) as binding:
+            self._binding = binding
+            descriptor = _acquire_lock(lock, binding)
             try:
                 yield
             finally:
-                if os.name != "nt":
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _release_lock(lock, descriptor, binding)
+                self._binding = None
+
+    def _check_parent(self) -> None:
+        if self._binding is not None:
+            self._binding.check()
 
 
 def _payload(config: AdminConfig, token: str | None, revision: int) -> dict[str, object]:
@@ -216,6 +227,25 @@ def _reject_unsafe(path: Path, *, file: bool, allow_missing: bool = False) -> No
         raise AdminStateError("unsafe admin state path")
 
 
+@contextmanager
+def _open_regular(path: Path, flags: int):
+    """Open a regular non-link file and bind the checked identity to its handle."""
+    expected = os.lstat(path)
+    if not stat.S_ISREG(expected.st_mode):
+        raise AdminStateError("unsafe admin state path")
+    open_flags = flags
+    if hasattr(os, "O_NOFOLLOW"):
+        open_flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, open_flags)
+    try:
+        actual = os.fstat(descriptor)
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino) or not stat.S_ISREG(actual.st_mode):
+            raise AdminStateError("admin state path changed while opening")
+        yield os.fdopen(descriptor, "rb", closefd=False)
+    finally:
+        os.close(descriptor)
+
+
 def _ensure_safe_parent(parent: Path) -> None:
     """Create a private parent only after rejecting every existing symlink ancestor."""
     for ancestor in (parent, *parent.parents):
@@ -228,6 +258,85 @@ def _ensure_safe_parent(parent: Path) -> None:
     _reject_unsafe(parent, file=False)
 
 
+class _ParentBinding:
+    """Bind a checked parent directory across state operations.
+
+    Windows opens the directory with FILE_FLAG_OPEN_REPARSE_POINT, so a junction
+    or symlink is rejected instead of traversed. Each name-based operation opens
+    the current parent the same way and compares stable file identity to detect a
+    concurrent rename/reparse swap. POSIX uses lstat identity plus O_NOFOLLOW on
+    child files; the binding is deliberately small so native primitives stay here.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle: int | None = None
+        self._identity: tuple[int, int, int] | tuple[int, int] | None = None
+
+    def __enter__(self):
+        self._handle, self._identity = _open_parent_identity(self.path)
+        return self
+
+    def check(self) -> None:
+        handle, identity = _open_parent_identity(self.path)
+        try:
+            if identity != self._identity:
+                raise AdminStateError("admin state parent changed during operation")
+        finally:
+            _close_parent_handle(handle)
+
+    def __exit__(self, *_exc):
+        if self._handle is not None:
+            _close_parent_handle(self._handle)
+            self._handle = None
+
+
+def _open_parent_identity(path: Path) -> tuple[int | None, tuple[int, int, int] | tuple[int, int]]:
+    if os.name != "nt":
+        info = os.lstat(path)
+        if not stat.S_ISDIR(info.st_mode):
+            raise AdminStateError("unsafe admin state parent")
+        return None, (info.st_dev, info.st_ino)
+    handle = _win_open_directory(path)
+    try:
+        return handle, _win_identity(handle)
+    except BaseException:
+        _close_parent_handle(handle)
+        raise
+
+
+def _close_parent_handle(handle: int | None) -> None:
+    if handle is not None and os.name == "nt":
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def _win_open_directory(path: Path) -> int:
+    kernel32 = ctypes.windll.kernel32
+    create = kernel32.CreateFileW
+    create.argtypes = (ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+    create.restype = ctypes.c_void_p
+    handle = create(str(path), 0x80, 0x7, None, 3, 0x02000000 | 0x00200000, None)
+    raw = ctypes.cast(handle, ctypes.c_void_p).value
+    if raw in (None, ctypes.c_void_p(-1).value):
+        raise AdminStateError("unable to safely open admin state parent")
+    identity = _win_identity(raw)
+    if identity[2] & 0x400:
+        _close_parent_handle(raw)
+        raise AdminStateError("unsafe admin state reparse parent")
+    return raw
+
+
+def _win_identity(handle: int) -> tuple[int, int, int]:
+    class INFO(ctypes.Structure):
+        _fields_ = [("attrs", ctypes.c_uint32), ("ctime", ctypes.c_uint64), ("atime", ctypes.c_uint64), ("wtime", ctypes.c_uint64), ("volume", ctypes.c_uint32), ("size_hi", ctypes.c_uint32), ("size_lo", ctypes.c_uint32), ("links", ctypes.c_uint32), ("index_hi", ctypes.c_uint32), ("index_lo", ctypes.c_uint32)]
+    info = INFO()
+    if not ctypes.windll.kernel32.GetFileInformationByHandle(ctypes.c_void_p(handle), ctypes.byref(info)):
+        raise AdminStateError("unable to inspect admin state path")
+    if not info.attrs & 0x10:
+        raise AdminStateError("admin state parent is not a directory")
+    return (info.volume, (info.index_hi << 32) | info.index_lo, info.attrs)
+
+
 def _fsync_dir(directory: Path) -> None:
     try:
         descriptor = os.open(directory, os.O_RDONLY)
@@ -237,3 +346,40 @@ def _fsync_dir(directory: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _acquire_lock(lock: Path, binding: _ParentBinding) -> int:
+    """Create an exclusive lockfile; O_EXCL serializes processes on Windows too."""
+    deadline = time.monotonic() + 10
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    while True:
+        binding.check()
+        try:
+            descriptor = os.open(lock, flags, 0o600)
+        except FileExistsError:
+            _reject_unsafe(lock, file=True)
+            if time.monotonic() >= deadline:
+                raise AdminStateError("admin state lock is busy")
+            time.sleep(0.01)
+            continue
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            os.close(descriptor)
+            raise AdminStateError("unsafe admin state lock")
+        return descriptor
+
+
+def _release_lock(lock: Path, descriptor: int, binding: _ParentBinding) -> None:
+    try:
+        created = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        binding.check()
+        current = lock.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+        os.unlink(lock)

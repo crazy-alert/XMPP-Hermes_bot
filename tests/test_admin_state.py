@@ -1,7 +1,9 @@
 import json
+import multiprocessing
 import os
 import stat
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,17 @@ from xmpp_bridge.admin_state import AdminConfig, AdminState, AdminStateError, Co
 
 
 OWNER = "Owner@Example.Com/phone"
+
+
+def _process_mutate(path, field, start, result):
+    from xmpp_bridge.admin_state import AdminState
+    start.wait(10)
+    state = AdminState(Path(path), OWNER)
+    if field == "model":
+        config = state.mutate(lambda current: current.with_changes(model="process-one"))
+    else:
+        config = state.mutate(lambda current: current.with_changes(endpoint="https://process.example/v1"))
+    result.put(config.revision)
 
 
 def test_initial_owner_normalizes_and_snapshot_never_contains_token(tmp_path):
@@ -154,3 +167,97 @@ def test_mutate_reloads_current_disk_state_to_avoid_lost_updates(tmp_path):
     assert updated.model == "one"
     assert updated.endpoint == "https://two.example/v1"
     assert updated.revision == 2
+
+
+def test_failed_replace_preserves_prior_complete_state(tmp_path, monkeypatch):
+    path = tmp_path / "admin.json"
+    state = AdminState(path, OWNER)
+    state.load()
+    before = path.read_bytes()
+
+    def fail_replace(source, destination):
+        raise OSError("interrupted replace")
+
+    monkeypatch.setattr("xmpp_bridge.admin_state.os.replace", fail_replace)
+    with pytest.raises(OSError, match="interrupted replace"):
+        state.mutate(lambda config: config.with_changes(model="never-persisted"))
+
+    assert path.read_bytes() == before
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_independent_instances_serialize_concurrent_mutations(tmp_path):
+    path = tmp_path / "admin.json"
+    first, second = AdminState(path, OWNER), AdminState(path, OWNER)
+    first.load()
+    start = threading.Barrier(2)
+    failures = []
+
+    def update(state, change):
+        try:
+            start.wait()
+            state.mutate(change)
+        except BaseException as error:
+            failures.append(error)
+
+    threads = [
+        threading.Thread(target=update, args=(first, lambda config: config.with_changes(model="one"))),
+        threading.Thread(target=update, args=(second, lambda config: config.with_changes(endpoint="https://two.example/v1"))),
+    ]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join()
+
+    assert failures == []
+    config = AdminState(path, OWNER).load()
+    assert (config.model, config.endpoint, config.revision) == ("one", "https://two.example/v1", 2)
+
+
+def test_independent_processes_serialize_concurrent_mutations(tmp_path):
+    path = tmp_path / "admin.json"
+    AdminState(path, OWNER).load()
+    context = multiprocessing.get_context("spawn")
+    start, result = context.Event(), context.Queue()
+    processes = [
+        context.Process(target=_process_mutate, args=(str(path), "model", start, result)),
+        context.Process(target=_process_mutate, args=(str(path), "endpoint", start, result)),
+    ]
+    for process in processes: process.start()
+    start.set()
+    for process in processes: process.join(15)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert sorted(result.get(timeout=2) for _ in processes) == [1, 2]
+    config = AdminState(path, OWNER).load()
+    assert config.revision == 2
+    assert {config.model, config.endpoint} == {"process-one", "https://process.example/v1"}
+
+
+def test_parent_swap_is_detected_before_state_write(tmp_path, monkeypatch):
+    parent = tmp_path / "state"
+    parent.mkdir()
+    path = parent / "admin.json"
+    AdminState(path, OWNER).load()
+    external = tmp_path / "external"
+    external.mkdir()
+    marker = external / "marker"
+    marker.write_text("unchanged", encoding="utf-8")
+    parked = tmp_path / "parked"
+    real_check = __import__("xmpp_bridge.admin_state", fromlist=["_ParentBinding"])._ParentBinding.check
+    swapped = False
+
+    def swap_after_check(binding):
+        nonlocal swapped
+        real_check(binding)
+        if not swapped:
+            swapped = True
+            parent.rename(parked)
+            try:
+                parent.symlink_to(external, target_is_directory=True)
+            except OSError as error:
+                pytest.skip(str(error))
+
+    monkeypatch.setattr("xmpp_bridge.admin_state._ParentBinding.check", swap_after_check)
+    with pytest.raises(AdminStateError):
+        AdminState(path, OWNER).mutate(lambda config: config.with_changes(model="blocked"))
+    assert marker.read_text(encoding="utf-8") == "unchanged"
+    assert not (external / "admin.json").exists()
