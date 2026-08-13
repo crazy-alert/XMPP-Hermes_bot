@@ -42,16 +42,16 @@ class FakeHttp:
         self.releases = releases
         self.manifests = manifests or {item["tag_name"]: manifest(item["tag_name"].removeprefix("v")) for item in releases}
         self.etag = etag
-        self.calls: list[tuple[str, dict[str, str], float, int]] = []
+        self.calls: list[tuple[str, dict[str, str], float, int, bool]] = []
 
-    def __call__(self, url: str, headers: dict[str, str], timeout: float, max_bytes: int) -> HttpResponse:
-        self.calls.append((url, headers, timeout, max_bytes))
+    def __call__(self, url: str, headers: dict[str, str], timeout: float, max_bytes: int, allow_redirects: bool) -> HttpResponse:
+        self.calls.append((url, headers, timeout, max_bytes, allow_redirects))
         if url == API_URL:
             if headers.get("If-None-Match") == self.etag:
-                return HttpResponse(304, {}, b"")
-            return HttpResponse(200, {"ETag": self.etag}, json.dumps(self.releases).encode())
+                return HttpResponse(304, {}, b"", final_url=url, redirected=False)
+            return HttpResponse(200, {"ETag": self.etag}, json.dumps(self.releases).encode(), final_url=url, redirected=False)
         tag = url.split("/download/", 1)[1].split("/", 1)[0]
-        return HttpResponse(200, {}, json.dumps(self.manifests[tag]).encode())
+        return HttpResponse(200, {}, json.dumps(self.manifests[tag]).encode(), final_url=url, redirected=False)
 
 
 def test_fixed_api_etag_304_and_deduplicated_state() -> None:
@@ -59,6 +59,8 @@ def test_fixed_api_etag_304_and_deduplicated_state() -> None:
     checker = ReleaseChecker(http=http, jitter=lambda: 0.0)
     first = checker.check(UpdateState(current_version="1.0.0"))
     assert http.calls[0][0] == API_URL
+    assert http.calls[0][4] is False
+    assert set(http.calls[0][1]) <= {"Accept", "If-None-Match"}
     assert first.available is not None and first.notify is True
     notified = first.state.mark_notified()
     second = checker.check(notified)
@@ -111,7 +113,7 @@ def test_notes_are_control_cleaned_and_truncated_and_repr_has_no_headers() -> No
 def test_schema_body_count_timeout_and_backoff_are_bounded() -> None:
     class Failing:
         def __init__(self) -> None: self.calls = 0
-        def __call__(self, url, headers, timeout, max_bytes):
+        def __call__(self, url, headers, timeout, max_bytes, allow_redirects):
             self.calls += 1
             assert timeout <= 10 and max_bytes <= 1_000_000
             raise TimeoutError("secret-header")
@@ -146,3 +148,53 @@ def test_duplicate_bool_and_oversize_strings_are_rejected() -> None:
     long_etag = FakeHttp([release()], etag='"' + "x" * 256 + '"')
     with pytest.raises(ValueError, match="invalid release metadata"):
         ReleaseChecker(http=long_etag, jitter=lambda: 0).check(UpdateState("1.0.0"))
+
+
+@pytest.mark.parametrize("etag", ["plain", 'W/"bad\\tag"', '"bad\r\nheader"', "x" * 129, 123])
+def test_invalid_persisted_etag_fails_before_http(etag: object) -> None:
+    http = FakeHttp([release()])
+    with pytest.raises(ValueError, match="invalid update state"):
+        ReleaseChecker(http=http, jitter=lambda: 0).check(UpdateState("1.0.0", etag=etag))  # type: ignore[arg-type]
+    assert http.calls == []
+
+
+@pytest.mark.parametrize("etag", ['"bad\x7f"', 'W/"bad\\tag"', '"bad\r\nheader"'])
+def test_invalid_response_etag_is_never_persisted(etag: str) -> None:
+    http = FakeHttp([release()], etag=etag)
+    with pytest.raises(ValueError, match="invalid release metadata"):
+        ReleaseChecker(http=http, jitter=lambda: 0).check(UpdateState("1.0.0"))
+
+
+def test_redirect_or_changed_final_url_is_rejected_before_parsing() -> None:
+    class Redirecting:
+        def __call__(self, url, headers, timeout, max_bytes, allow_redirects):
+            assert allow_redirects is False
+            return HttpResponse(200, {}, b"not json", final_url="https://attacker.invalid/x", redirected=True)
+    with pytest.raises(ValueError, match="invalid HTTP destination"):
+        ReleaseChecker(http=Redirecting(), jitter=lambda: 0).check(UpdateState("1.0.0"))
+
+
+@pytest.mark.parametrize("payload", [b"{", b"{}", b"[null]", b"[1]"])
+def test_malformed_json_and_schema_types_fail_safely(payload: bytes) -> None:
+    class Raw:
+        def __call__(self, url, headers, timeout, max_bytes, allow_redirects):
+            return HttpResponse(200, {}, payload, final_url=url, redirected=False)
+    with pytest.raises(ValueError, match="invalid release metadata"):
+        ReleaseChecker(http=Raw(), jitter=lambda: 0).check(UpdateState("1.0.0"))
+
+
+def test_oversize_body_and_tag_are_rejected_before_expensive_parsing() -> None:
+    class Oversize:
+        def __call__(self, url, headers, timeout, max_bytes, allow_redirects):
+            return HttpResponse(200, {}, b" " * (max_bytes + 1), final_url=url, redirected=False)
+    with pytest.raises(ValueError, match="invalid release metadata"):
+        ReleaseChecker(http=Oversize(), jitter=lambda: 0).check(UpdateState("1.0.0"))
+    long_tag = release(); long_tag["tag_name"] = "v" + "1" * 129
+    with pytest.raises(ValueError, match="invalid release metadata"):
+        ReleaseChecker(http=FakeHttp([long_tag]), jitter=lambda: 0).check(UpdateState("1.0.0"))
+
+
+def test_notes_remove_unicode_controls_private_and_unassigned() -> None:
+    controls = "\x7f\x85\u202e\ue000\ud800\u0378"
+    result = ReleaseChecker(http=FakeHttp([release(notes="ok\n\t" + controls)]), jitter=lambda: 0).check(UpdateState("1.0.0"))
+    assert result.available.notes == "ok\n\t"

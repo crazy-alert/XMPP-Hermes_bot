@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
@@ -16,6 +17,7 @@ _SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ASSET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_ETAG = re.compile(r'(?:W/)?"[\x21\x23-\x5b\x5d-\x7e]{1,120}"\Z')
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,8 @@ class HttpResponse:
     status: int
     headers: Mapping[str, str]
     body: bytes
+    final_url: str
+    redirected: bool
 
 
 @dataclass(frozen=True)
@@ -86,7 +90,11 @@ def _json(response: HttpResponse) -> object:
 def _notes(value: object) -> str:
     if not isinstance(value, str):
         return ""
-    clean = "".join(character if character in "\n\t" or ord(character) >= 32 else " " for character in value)
+    clean = "".join(
+        character
+        for character in value
+        if character in "\n\t" or not unicodedata.category(character).startswith("C")
+    )
     return clean[:MAX_NOTES]
 
 
@@ -94,19 +102,24 @@ class ReleaseChecker:
     def __init__(
         self,
         *,
-        http: Callable[[str, dict[str, str], float, int], HttpResponse],
+        http: Callable[[str, dict[str, str], float, int, bool], HttpResponse],
         jitter: Callable[[], float],
     ) -> None:
         self._http = http
         self._jitter = jitter
 
     def _get(self, url: str, headers: dict[str, str] | None = None) -> HttpResponse:
-        return self._http(url, headers or {}, TIMEOUT_SECONDS, MAX_BODY_BYTES)
+        response = self._http(url, headers or {}, TIMEOUT_SECONDS, MAX_BODY_BYTES, False)
+        if response.redirected or response.final_url != url:
+            raise ValueError("invalid HTTP destination")
+        return response
 
     def check(self, state: UpdateState, *, allow_prerelease: bool = False) -> CheckResult:
         current = _version(state.current_version)
         if current is None:
             raise ValueError("invalid current version")
+        if state.etag is not None and (not isinstance(state.etag, str) or not _ETAG.fullmatch(state.etag)):
+            raise ValueError("invalid update state")
         headers = {"Accept": "application/vnd.github+json"}
         if state.etag:
             headers["If-None-Match"] = state.etag
@@ -131,12 +144,14 @@ class ReleaseChecker:
                 if item.get("prerelease") not in (True, False):
                     continue
                 tag = item.get("tag_name")
+                if not isinstance(tag, str) or len(tag) > 128:
+                    raise ValueError("invalid release metadata")
                 parsed = _version(tag[1:]) if isinstance(tag, str) and tag.startswith("v") else None
                 if parsed is not None and parsed > current:
                     candidates.append((parsed, item))
             available = self._verify(max(candidates, key=lambda pair: pair[0])[1]) if candidates else None
             etag = response.headers.get("ETag")
-            if etag is not None and (not isinstance(etag, str) or len(etag) > 128):
+            if etag is not None and (not isinstance(etag, str) or not _ETAG.fullmatch(etag)):
                 raise ValueError("invalid release metadata")
             updated = replace(state, available=available, etag=etag if isinstance(etag, str) else None, failures=0)
             notify = available is not None and available.version != state.notified_version
