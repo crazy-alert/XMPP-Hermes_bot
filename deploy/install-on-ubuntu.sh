@@ -62,7 +62,40 @@ if find "$PLUGIN_SOURCE" \( -type l -o \( ! -type d ! -type f \) \) -print -quit
     printf '%s\n' 'Ошибка: источник плагина содержит ссылку или нерегулярный файл.' >&2
     exit 1
 fi
-if ! getent group docker >/dev/null; then
+docker_ready() {
+    command -v docker >/dev/null && getent group docker >/dev/null && docker info >/dev/null 2>&1
+}
+
+confirm_docker_installation() {
+    if [ ! -t 0 ]; then
+        printf '%s\n' 'Docker Engine is not ready and installation requires interactive input.' >&2
+        return 1
+    fi
+    printf '%s' 'Docker Engine is not ready. Install Ubuntu package docker.io? [y/N] '
+    IFS= read -r answer || return 1
+    answer=${answer%$'\r'}
+    case "$answer" in
+        [Yy]|[Yy][Ee][Ss]|$'\320\264\320\260'|$'\320\264\320\220'|$'\320\224\320\260'|$'\320\224\320\220') return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if ! docker_ready; then
+    if ! confirm_docker_installation; then
+        printf '%s\n' 'Hermes installation cancelled: Docker Engine is not ready.' >&2
+        exit 1
+    fi
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends docker.io
+    systemctl enable --now docker
+    if ! docker_ready; then
+        printf '%s\n' 'Docker Engine failed the post-installation check.' >&2
+        exit 1
+    fi
+fi
+
+if ! docker_ready; then
     printf '%s\n' 'Ошибка: группа docker отсутствует; сначала установите Docker Engine.' >&2
     exit 1
 fi

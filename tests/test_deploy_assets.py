@@ -57,15 +57,23 @@ def build_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     (fake_root / "etc/os-release").write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
 
     logger = 'printf "%s\\n" "$(basename "$0") $*" >>"$HERMES_TEST_LOG"\n'
-    for name in ("apt-get", "groupadd", "useradd", "usermod", "chown"):
+    for name in ("groupadd", "useradd", "usermod", "chown"):
         write_executable(bin_dir / name, logger)
+    write_executable(
+        bin_dir / "apt-get",
+        logger
+        + """
+if [ "${HERMES_TEST_FAIL_DOCKER_INSTALL:-0}" = 1 ] && [ "${1:-}" = install ]; then exit 1; fi
+case " $* " in *' docker.io '*) touch "$HERMES_TEST_STATE/docker-package" ;; esac
+""",
+    )
     write_executable(bin_dir / "dpkg", "exit 0\n")
 
     write_executable(
         bin_dir / "getent",
         """
 case "$1:$2" in
-  group:docker) echo 'docker:x:999:' ;;
+  group:docker) [ "${HERMES_TEST_DOCKER_READY:-1}" = 1 ] || [ -e "$HERMES_TEST_STATE/docker-package" ] || exit 2; echo 'docker:x:999:' ;;
   group:hermes) [ -e "$HERMES_TEST_STATE/group" ] && echo 'hermes:x:998:' || exit 2 ;;
   passwd:hermes) [ -e "$HERMES_TEST_STATE/user" ] && echo 'hermes:x:998:998::/var/lib/hermes:/usr/sbin/nologin' || exit 2 ;;
   *) exit 2 ;;
@@ -112,15 +120,22 @@ cp "$HERMES_TEST_UPSTREAM" "$out"
         logger
         + """
 case "$1" in
+  enable) [ "${2:-}" != --now ] || [ "${3:-}" != docker ] || touch "$HERMES_TEST_STATE/docker-daemon"; touch "$HERMES_TEST_STATE/enabled" ;;
   is-active) [ -e "$HERMES_TEST_STATE/active" ] ;;
   is-enabled) [ -e "$HERMES_TEST_STATE/enabled" ] ;;
   stop) [ "${HERMES_TEST_FAIL_STOP:-0}" != 1 ] && rm -f "$HERMES_TEST_STATE/active" ;;
   disable) rm -f "$HERMES_TEST_STATE/enabled" ;;
   start) touch "$HERMES_TEST_STATE/active" ;;
-  enable) touch "$HERMES_TEST_STATE/enabled" ;;
   daemon-reload) : ;;
   *) exit 2 ;;
 esac
+""",
+    )
+    write_executable(
+        bin_dir / "docker",
+        """
+if [ "${1:-}" = info ] && [ "${HERMES_TEST_DOCKER_READY:-1}" = 1 -o \\( -e "$HERMES_TEST_STATE/docker-package" -a -e "$HERMES_TEST_STATE/docker-daemon" -a "${HERMES_TEST_FAIL_DOCKER_DAEMON:-0}" != 1 \\) ]; then exit 0; fi
+exit 1
 """,
     )
 
@@ -156,6 +171,7 @@ def generated_installer(
     *,
     inject_after: str | None = None,
     race_after: str | None = None,
+    interactive_stdin: bool = False,
 ) -> Path:
     source = read_asset("deploy/install-on-ubuntu.sh")
     deploy = bash_path(ROOT / "deploy")
@@ -177,6 +193,8 @@ def generated_installer(
     for old, new in replacements.items():
         assert old in source, old
         source = source.replace(old, new, 1)
+    if interactive_stdin:
+        source = source.replace('if [ ! -t 0 ]; then', 'if false; then', 1)
     if inject_after:
         assert inject_after in source
         sentinel = bash_path(tmp_path / "injection-reached")
@@ -192,7 +210,13 @@ def generated_installer(
     return generated
 
 
-def run_installer(tmp_path: Path, *, extra: dict[str, str] | None = None, script: Path | None = None) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, str]]:
+def run_installer(
+    tmp_path: Path,
+    *,
+    extra: dict[str, str] | None = None,
+    script: Path | None = None,
+    input_text: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, str]]:
     fake_root, env = build_harness(tmp_path)
     if extra:
         env.update(extra)
@@ -200,7 +224,7 @@ def run_installer(tmp_path: Path, *, extra: dict[str, str] | None = None, script
     env["TEST_GENERATED_INSTALLER"] = str(script)
     result = subprocess.run(
         [find_bash(), str(script)], cwd=ROOT, env=env,
-        text=True, capture_output=True, check=False,
+        text=True, input=input_text, capture_output=True, check=False,
     )
     return result, fake_root, env
 
@@ -269,8 +293,9 @@ def test_root_never_traverses_hermes_owned_runtime_paths() -> None:
     assert root_dir_checks == ["HERMES_ACCOUNT_HOME_DISK"] * 3
     assert root_file_checks == []
     descendant_preflight = script.index("runuser -u hermes -- sh -c '")
-    assert descendant_preflight < script.index("apt-get update")
-    preflight_call = script[descendant_preflight:script.index("apt-get update")]
+    dependency_install = 'apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev'
+    assert descendant_preflight < script.index(dependency_install)
+    preflight_call = script[descendant_preflight:script.index(dependency_install)]
     for variable in (
         "HERMES_LOCAL_DISK", "HERMES_HOME_DISK", "HERMES_CACHE_DISK", "PLUGIN_PARENT",
         "HERMES_AGENT_DISK", "HERMES_VENV_DISK", "HERMES_VENV_BIN_DISK",
@@ -316,6 +341,74 @@ def test_first_install_accepts_official_wrapper_and_uses_managed_venv(tmp_path: 
     assert log.index("curl ") < log.index("usermod ")
 
 
+def test_ready_docker_skips_installation_preflight(tmp_path: Path) -> None:
+    result, _, env = run_installer(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    log = Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"]).read_text()
+    assert "apt-get install -y --no-install-recommends docker.io" not in log
+
+
+@pytest.mark.parametrize("answer", ["no\n", "\n"])
+def test_missing_docker_requires_explicit_installation_consent(tmp_path: Path, answer: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    env["HERMES_TEST_DOCKER_READY"] = "0"
+    script = generated_installer(tmp_path, fake_root, interactive_stdin=True)
+
+    result = subprocess.run(
+        [find_bash(), str(script)], cwd=ROOT, env=env, input=answer,
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode != 0
+    log_path = tmp_path / "commands.log"
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
+    assert not (fake_root / "etc/hermes/hermes.env").exists()
+
+
+@pytest.mark.parametrize("answer", ["yes\n", "ДА\n", "дА\n"])
+def test_missing_docker_installs_after_explicit_consent(tmp_path: Path, answer: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    env["HERMES_TEST_DOCKER_READY"] = "0"
+    script = generated_installer(tmp_path, fake_root, interactive_stdin=True)
+
+    result = subprocess.run(
+        [find_bash(), str(script)], cwd=ROOT, env=env, input=answer.encode("utf-8"),
+        capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    log = (tmp_path / "commands.log").read_text()
+    assert "apt-get update" in log
+    assert "apt-get install -y --no-install-recommends docker.io" in log
+    assert "systemctl enable --now docker" in log
+    assert log.index("systemctl enable --now docker") < log.index("groupadd --system hermes")
+
+
+def test_missing_docker_rejects_noninteractive_stdin(tmp_path: Path) -> None:
+    result, root, env = run_installer(tmp_path, extra={"HERMES_TEST_DOCKER_READY": "0"})
+
+    assert result.returncode != 0
+    log_path = Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"])
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
+    assert not (root / "etc/hermes/hermes.env").exists()
+
+
+@pytest.mark.parametrize("failure", ["HERMES_TEST_FAIL_DOCKER_INSTALL", "HERMES_TEST_FAIL_DOCKER_DAEMON"])
+def test_missing_docker_fails_when_installation_does_not_make_it_ready(tmp_path: Path, failure: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    env.update(HERMES_TEST_DOCKER_READY="0", **{failure: "1"})
+    script = generated_installer(tmp_path, fake_root, interactive_stdin=True)
+
+    result = subprocess.run(
+        [find_bash(), str(script)], cwd=ROOT, env=env, input="y\n",
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode != 0
+    assert not (fake_root / "etc/hermes/hermes.env").exists()
+
+
 def test_rerun_skips_runtime_installer_and_preserves_env(tmp_path: Path) -> None:
     first, root, env = run_installer(tmp_path)
     assert first.returncode == 0, first.stderr
@@ -359,7 +452,8 @@ def test_plugin_copy_is_explicit_allowlist(tmp_path: Path) -> None:
         dest = root / "var/lib/hermes/.hermes/plugins/xmpp-platform"
         assert sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()) == [
             "adapter.py", "plugin.yaml", "xmpp_bridge/__init__.py", "xmpp_bridge/admin_state.py", "xmpp_bridge/client.py",
-            "xmpp_bridge/models.py", "xmpp_bridge/policy.py", "xmpp_bridge/state.py",
+            "xmpp_bridge/commands.py", "xmpp_bridge/models.py", "xmpp_bridge/policy.py", "xmpp_bridge/reboot.py",
+            "xmpp_bridge/state.py", "xmpp_bridge/updates.py",
         ]
     finally:
         shutil.rmtree(junk)
