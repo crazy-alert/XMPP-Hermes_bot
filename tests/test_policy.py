@@ -17,22 +17,22 @@ from xmpp_bridge.policy import (
 )
 
 
-def direct(sender="admin@aversa.run", body="Вопрос", chat="hermes@aversa.run"):
+def direct(sender="admin@example.com", body="Вопрос", chat="bot@example.com"):
     return InboundXmppMessage("m1", chat, sender, "Admin", body, False, None)
 
 
-def group(sender="admin@aversa.run", body="Hermes, вопрос", nick="Admin", reply=None):
-    return InboundXmppMessage("m2", "room@conference.aversa.run", sender, nick, body, True, reply)
+def group(sender="admin@example.com", body="Hermes, вопрос", nick="Admin", reply=None):
+    return InboundXmppMessage("m2", "room@conference.example.com", sender, nick, body, True, reply)
 
 
-ALLOWED = frozenset({"admin@aversa.run", "yuklya@aversa.run", "julia@aversa.run"})
+ALLOWED = frozenset({"admin@example.com", "alice@example.com", "bob@example.com"})
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("Admin@Aversa.Run/phone", "admin@aversa.run"),
-        ("  YUKLYA@AVERSA.RUN  ", "yuklya@aversa.run"),
+        ("Admin@Example.Com/phone", "admin@example.com"),
+        ("  ALICE@EXAMPLE.COM  ", "alice@example.com"),
     ],
 )
 def test_normalize_bare_jid_removes_resource_and_casefolds(value, expected):
@@ -42,9 +42,9 @@ def test_normalize_bare_jid_removes_resource_and_casefolds(value, expected):
 @pytest.mark.parametrize(
     "value",
     [
-        "", "  ", "no-at-sign", "@aversa.run", "admin@", "a@b@c", "a b@c",
-        "a@.", "a@.aversa.run", "a@aversa.run.", "a@aversa..run",
-        "a@aversa\x00.run", "a@aversa\x1f.run", "a\x7f@aversa.run",
+        "", "  ", "no-at-sign", "@example.com", "admin@", "a@b@c", "a b@c",
+        "a@.", "a@.example.com", "a@example.com.", "a@example..com",
+        "a@example\x00.com", "a@example\x1f.com", "a\x7f@example.com",
     ],
 )
 def test_normalize_bare_jid_rejects_malformed_or_empty_values(value):
@@ -53,8 +53,8 @@ def test_normalize_bare_jid_rejects_malformed_or_empty_values(value):
 
 
 def test_parse_allowlist_normalizes_entries_and_ignores_empty_items():
-    assert parse_allowlist(" Admin@Aversa.Run/mobile, , yuklya@aversa.run ") == frozenset(
-        {"admin@aversa.run", "yuklya@aversa.run"}
+    assert parse_allowlist(" Admin@Example.Com/mobile, , alice@example.com ") == frozenset(
+        {"admin@example.com", "alice@example.com"}
     )
 
 
@@ -68,9 +68,9 @@ def test_direct_route_accepts_allowed_sender_and_strips_body():
 @pytest.mark.parametrize(
     "message, allowed",
     [
-        (direct(sender="intruder@aversa.run"), ALLOWED),
+        (direct(sender="intruder@example.com"), ALLOWED),
         (direct(body=" \t "), ALLOWED),
-        (direct(sender="hermes@aversa.run", chat="hermes@aversa.run"), ALLOWED | {"hermes@aversa.run"}),
+        (direct(sender="bot@example.com", chat="bot@example.com"), ALLOWED | {"bot@example.com"}),
     ],
 )
 def test_direct_route_rejects_denied_empty_and_self_messages(message, allowed):
@@ -82,11 +82,11 @@ def test_direct_route_rejects_denied_empty_and_self_messages(message, allowed):
     [
         ("Hermes, вопрос", "вопрос"),
         ("@Hermes вопрос", "вопрос"),
-        ("hermes@aversa.run вопрос", "вопрос"),
+        ("bot@example.com вопрос", "вопрос"),
     ],
 )
 def test_group_route_accepts_leading_case_insensitive_mentions_and_removes_marker(body, expected):
-    routed = route_group(group(body=body), ALLOWED, "hermes@aversa.run", "Hermes", set())
+    routed = route_group(group(body=body), ALLOWED, "bot@example.com", "Hermes", set())
     assert routed is not None
     assert routed.body == expected
 
@@ -102,11 +102,11 @@ def test_group_route_accepts_leading_case_insensitive_mentions_and_removes_marke
     ],
 )
 def test_group_route_rejects_nonleading_or_substring_mentions_and_empty_remainder(body):
-    assert route_group(group(body=body), ALLOWED, "hermes@aversa.run", "Hermes", set()) is None
+    assert route_group(group(body=body), ALLOWED, "bot@example.com", "Hermes", set()) is None
 
 
 def test_group_route_accepts_reply_to_recent_bot_message_without_mention():
-    routed = route_group(group(body="обычный ответ", reply="bot-42"), ALLOWED, "hermes@aversa.run", "Hermes", {"bot-42"})
+    routed = route_group(group(body="обычный ответ", reply="bot-42"), ALLOWED, "bot@example.com", "Hermes", {"bot-42"})
     assert routed is not None
     assert routed.body == "обычный ответ"
 
@@ -114,22 +114,22 @@ def test_group_route_accepts_reply_to_recent_bot_message_without_mention():
 @pytest.mark.parametrize(
     "message, bot_message_ids",
     [
-        (group(sender="intruder@aversa.run", reply="bot-42"), {"bot-42"}),
+        (group(sender="intruder@example.com", reply="bot-42"), {"bot-42"}),
         (group(body="обычный ответ", reply="not-cached"), {"bot-42"}),
         (group(nick="hErMeS"), set()),
     ],
 )
 def test_group_route_checks_allowlist_before_activation_and_rejects_own_nick(message, bot_message_ids):
-    assert route_group(message, ALLOWED, "hermes@aversa.run", "Hermes", bot_message_ids) is None
+    assert route_group(message, ALLOWED, "bot@example.com", "Hermes", bot_message_ids) is None
 
 
 @pytest.mark.parametrize(
     "message, bot_jid, bot_message_ids",
     [
-        (InboundXmppMessage("m", "not-a-room", "admin@aversa.run", "Admin", "reply", True, "bot-42"), "hermes@aversa.run", {"bot-42"}),
+        (InboundXmppMessage("m", "not-a-room", "admin@example.com", "Admin", "reply", True, "bot-42"), "bot@example.com", {"bot-42"}),
         (group(body="reply", reply="bot-42"), "not-a-jid", {"bot-42"}),
-        (group(body="reply", reply=""), "hermes@aversa.run", {""}),
-        (group(body="reply", reply="bot-42"), "hermes@aversa.run", "bot-42"),
+        (group(body="reply", reply=""), "bot@example.com", {""}),
+        (group(body="reply", reply="bot-42"), "bot@example.com", "bot-42"),
     ],
 )
 def test_group_route_rejects_invalid_room_bot_or_reply_id_cache_before_reply_activation(message, bot_jid, bot_message_ids):
@@ -137,10 +137,10 @@ def test_group_route_rejects_invalid_room_bot_or_reply_id_cache_before_reply_act
 
 
 def test_session_key_uses_normalized_bare_jids_for_direct_and_group_messages():
-    assert session_key(direct(sender="Admin@Aversa.Run/resource")) == "xmpp:dm:admin@aversa.run"
-    assert session_key(group(sender="Admin@Aversa.Run/resource").__class__(
-        "m2", "Room@Conference.Aversa.Run/desktop", "Admin@Aversa.Run/resource", "Admin", "body", True, None
-    )) == "xmpp:muc:room@conference.aversa.run:admin@aversa.run"
+    assert session_key(direct(sender="Admin@Example.Com/resource")) == "xmpp:dm:admin@example.com"
+    assert session_key(group(sender="Admin@Example.Com/resource").__class__(
+        "m2", "Room@Conference.Example.Com/desktop", "Admin@Example.Com/resource", "Admin", "body", True, None
+    )) == "xmpp:muc:room@conference.example.com:admin@example.com"
 
 
 def test_session_key_rejects_direct_event_with_malformed_chat_jid():
@@ -150,15 +150,15 @@ def test_session_key_rejects_direct_event_with_malformed_chat_jid():
 
 def test_session_key_rejects_direct_event_addressed_from_its_own_chat_jid():
     with pytest.raises(ValueError):
-        session_key(direct(sender="hermes@aversa.run", chat="hermes@aversa.run"))
+        session_key(direct(sender="bot@example.com", chat="bot@example.com"))
 
 
 @pytest.mark.parametrize(
     "message",
     [
         direct(sender="not-a-jid"),
-        InboundXmppMessage("m", "not-a-room", "admin@aversa.run", "Admin", "body", True, None),
-        InboundXmppMessage("m", "hermes@aversa.run", "admin@aversa.run", "Admin", "body", "yes", None),
+        InboundXmppMessage("m", "not-a-room", "admin@example.com", "Admin", "body", True, None),
+        InboundXmppMessage("m", "bot@example.com", "admin@example.com", "Admin", "body", "yes", None),
     ],
 )
 def test_session_key_rejects_invalid_events(message):

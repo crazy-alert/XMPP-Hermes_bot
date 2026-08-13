@@ -15,9 +15,9 @@ from xmpp_bridge.models import InboundXmppMessage, XmppInvite
 from xmpp_bridge.state import RoomState
 
 
-BOT_JID = "hermes@aversa.run/Hermes"
-BOT_BARE = "hermes@aversa.run"
-ROOM = "private@conference.aversa.run"
+BOT_JID = "bot@example.com/Hermes"
+BOT_BARE = "bot@example.com"
+ROOM = "private@conference.example.com"
 
 
 def make_client(tmp_path, *, on_message=None, on_invite=None):
@@ -28,7 +28,7 @@ def make_client(tmp_path, *, on_message=None, on_invite=None):
     )
 
 
-def direct_stanza(*, sender="Admin@Aversa.Run/phone", body="hello", message_id="dm-1", reply_id=None):
+def direct_stanza(*, sender="Admin@Example.Com/phone", body="hello", message_id="dm-1", reply_id=None):
     stanza = Message()
     stanza["type"] = "chat"
     stanza["from"] = sender
@@ -40,7 +40,7 @@ def direct_stanza(*, sender="Admin@Aversa.Run/phone", body="hello", message_id="
     return stanza
 
 
-def group_stanza(*, sender="private@conference.aversa.run/Admin", body="hello", message_id="muc-1", delayed=False):
+def group_stanza(*, sender="private@conference.example.com/Admin", body="hello", message_id="muc-1", delayed=False):
     stanza = Message()
     stanza["type"] = "groupchat"
     stanza["from"] = sender
@@ -48,7 +48,7 @@ def group_stanza(*, sender="private@conference.aversa.run/Admin", body="hello", 
     stanza["body"] = body
     stanza["id"] = message_id
     muc_user = ET.SubElement(stanza.xml, "{http://jabber.org/protocol/muc#user}x")
-    ET.SubElement(muc_user, "{http://jabber.org/protocol/muc#user}item", {"jid": "Admin@Aversa.Run/phone"})
+    ET.SubElement(muc_user, "{http://jabber.org/protocol/muc#user}item", {"jid": "Admin@Example.Com/phone"})
     if delayed:
         ET.SubElement(stanza.xml, "{urn:xmpp:delay}delay", {"stamp": "2026-08-12T00:00:00Z"})
     return stanza
@@ -61,7 +61,7 @@ def test_direct_message_translates_real_synthetic_stanza_to_model(tmp_path):
     client._handle_direct_message(direct_stanza(reply_id="previous-7"))
 
     assert received == [
-        InboundXmppMessage("dm-1", BOT_BARE, "admin@aversa.run", "admin", "hello", False, "previous-7")
+        InboundXmppMessage("dm-1", BOT_BARE, "admin@example.com", "admin", "hello", False, "previous-7")
     ]
 
 
@@ -69,8 +69,8 @@ def test_direct_message_translates_real_synthetic_stanza_to_model(tmp_path):
     "stanza",
     [
         group_stanza(delayed=True),
-        direct_stanza(sender="hermes@aversa.run/other-resource"),
-        group_stanza(sender="private@conference.aversa.run/Hermes"),
+        direct_stanza(sender="bot@example.com/other-resource"),
+        group_stanza(sender="private@conference.example.com/Hermes"),
     ],
 )
 def test_direct_or_group_history_and_self_messages_are_not_delivered(tmp_path, stanza):
@@ -91,7 +91,7 @@ def test_group_message_uses_room_bare_sender_bare_and_actual_own_nick(tmp_path):
     client._handle_group_message(group_stanza(sender=f"{ROOM}/Hermes_2", message_id="own"))
 
     assert received == [
-        InboundXmppMessage("muc-1", ROOM, "admin@aversa.run", "Admin", "hello", True, None, "Hermes_2")
+        InboundXmppMessage("muc-1", ROOM, "admin@example.com", "Admin", "hello", True, None, "Hermes_2")
     ]
 
 
@@ -108,7 +108,7 @@ def test_nick_collision_presence_updates_nick_carried_by_real_group_stanza(tmp_p
 
     assert received == [
         InboundXmppMessage(
-            "muc-1", ROOM, "admin@aversa.run", "Admin", "Hermes_2: question", True, None, "Hermes_2"
+            "muc-1", ROOM, "admin@example.com", "Admin", "Hermes_2: question", True, None, "Hermes_2"
         )
     ]
 
@@ -118,14 +118,14 @@ def mediated_invite():
     stanza["from"] = ROOM
     stanza["to"] = BOT_JID
     stanza.enable("muc")
-    stanza["muc"]["invite"]["from"] = "Admin@Aversa.Run/phone"
+    stanza["muc"]["invite"]["from"] = "Admin@Example.Com/phone"
     stanza["body"] = "untrusted body"
     return stanza
 
 
 def direct_invite():
     stanza = Message()
-    stanza["from"] = "Admin@Aversa.Run/phone"
+    stanza["from"] = "Admin@Example.Com/phone"
     stanza["to"] = BOT_JID
     stanza.enable("groupchat_invite")
     stanza["groupchat_invite"]["jid"] = ROOM
@@ -136,8 +136,8 @@ def direct_invite():
 @pytest.mark.parametrize(
     ("stanza_factory", "handler", "expected"),
     [
-        (mediated_invite, "_handle_mediated_invite", XmppInvite(ROOM, "admin@aversa.run", False)),
-        (direct_invite, "_handle_direct_invite", XmppInvite(ROOM, "admin@aversa.run", True)),
+        (mediated_invite, "_handle_mediated_invite", XmppInvite(ROOM, "admin@example.com", False)),
+        (direct_invite, "_handle_direct_invite", XmppInvite(ROOM, "admin@example.com", True)),
     ],
 )
 def test_invites_extract_addresses_from_extensions_before_any_join_or_state(tmp_path, stanza_factory, handler, expected):
@@ -187,13 +187,13 @@ def test_outbound_splits_at_paragraph_or_whitespace_and_returns_stanza_ids(tmp_p
     sent = capture_outbound(client)
     body = "a" * 3499 + "\n\n" + "b" * 20
 
-    ids = asyncio.run(client.send_direct("Admin@Aversa.Run/phone", body))
+    ids = asyncio.run(client.send_direct("Admin@Example.Com/phone", body))
 
     assert len(ids) == 2
     assert [stanza["id"] for stanza in sent] == ids
     assert [stanza["body"] for stanza in sent] == ["a" * 3499, "b" * 20]
     assert all(len(stanza["body"]) <= 3500 for stanza in sent)
-    assert all(stanza["to"] == "admin@aversa.run" and stanza["type"] == "chat" for stanza in sent)
+    assert all(stanza["to"] == "admin@example.com" and stanza["type"] == "chat" for stanza in sent)
 
 
 def test_outbound_splits_single_long_unicode_word_and_marks_group_messages(tmp_path):
@@ -213,13 +213,13 @@ def test_typing_stanzas_use_chat_states_for_direct_and_group_targets(tmp_path):
     sent = capture_outbound(client)
 
     async def send_states():
-        await client.set_typing("admin@aversa.run", False, True)
+        await client.set_typing("admin@example.com", False, True)
         await client.set_typing(ROOM, True, False)
 
     asyncio.run(send_states())
 
     assert [(stanza["to"], stanza["type"], stanza["chat_state"]) for stanza in sent] == [
-        ("admin@aversa.run", "chat", "composing"),
+        ("admin@example.com", "chat", "composing"),
         (ROOM, "groupchat", "active"),
     ]
 

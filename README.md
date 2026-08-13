@@ -1,7 +1,7 @@
 # Hermes Agent + XMPP
 
 Плагин подключает Hermes Agent к ejabberd через TLS как
-`hermes@aversa.run/Hermes`. Развёртывание рассчитано на Ubuntu 24.04 или новее
+`bot@example.com/Hermes`. Развёртывание рассчитано на Ubuntu 24.04 или новее
 и отдельного непривилегированного пользователя `hermes`.
 
 ## Установка
@@ -23,12 +23,12 @@ sudo bash deploy/install-on-ubuntu.sh
 
 ```bash
 read -rsp 'Пароль XMPP для Hermes: ' BOT_PASSWORD; printf '\n'
-docker compose exec ejabberd ejabberdctl register hermes aversa.run "$BOT_PASSWORD"
+docker compose exec ejabberd ejabberdctl register bot example.com "$BOT_PASSWORD"
 unset BOT_PASSWORD
 ```
 
 Настройте провайдера интерактивно. Для custom OpenAI-compatible endpoint
-укажите `https://api.aitunnel.ru/v1`, модель `gpt-5.6-sol`, а API-ключ вводите
+укажите `https://llm.example.com/v1`, модель `gpt-5.6-sol`, а API-ключ вводите
 только в секретный prompt команды:
 
 ```bash

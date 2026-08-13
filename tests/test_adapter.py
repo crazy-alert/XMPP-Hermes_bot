@@ -117,9 +117,9 @@ spec.loader.exec_module(adapter_module)
 from xmpp_bridge.models import InboundXmppMessage, XmppInvite
 
 
-BOT = "hermes@aversa.run/Hermes"
-ADMIN = "admin@aversa.run"
-ROOM = "private@conference.aversa.run"
+BOT = "bot@example.com/Hermes"
+ADMIN = "admin@example.com"
+ROOM = "private@conference.example.com"
 PASSWORD = "super-secret-password"
 
 
@@ -210,7 +210,7 @@ def test_contract_send_selects_dm_or_muc_and_returns_all_stanza_ids():
     client = FakeClient.instances[-1]
     adapter.room_state.add(ROOM)
 
-    direct = run(adapter.send("Admin@Aversa.Run/phone", "hello"))
+    direct = run(adapter.send("Admin@Example.Com/phone", "hello"))
     group = run(adapter.send(ROOM, "group hello"))
 
     assert client.calls == [
@@ -229,8 +229,8 @@ def test_contract_forbidden_dm_and_muc_never_reach_handle_message():
     adapter = make_adapter()
 
     async def scenario():
-        await adapter._dispatch_message(InboundXmppMessage("d1", BOT, "intruder@aversa.run", "Intruder", "hi", False, None))
-        await adapter._dispatch_message(InboundXmppMessage("g1", ROOM, "intruder@aversa.run", "Intruder", "Hermes: hi", True, None))
+        await adapter._dispatch_message(InboundXmppMessage("d1", BOT, "intruder@example.com", "Intruder", "hi", False, None))
+        await adapter._dispatch_message(InboundXmppMessage("g1", ROOM, "intruder@example.com", "Intruder", "Hermes: hi", True, None))
         await adapter._dispatch_message(InboundXmppMessage("g2", ROOM, "not-a-verifiable-jid", "Admin", "Hermes: hi", True, None))
 
     run(scenario())
@@ -381,7 +381,7 @@ def test_dm_and_muc_events_have_exact_hermes_source_and_secret_free_fields():
 def test_group_requires_mention_or_reply_to_cached_bot_id_in_same_room():
     adapter = make_adapter()
     adapter.room_state.add(ROOM)
-    other = "other@conference.aversa.run"
+    other = "other@conference.example.com"
     adapter.room_state.add(other)
     client = FakeClient.instances[-1]
     client.group_ids = ["same-id"]
@@ -411,8 +411,8 @@ def test_invite_is_authorized_persisted_before_join_and_retained_on_failure(capl
 
     async def scenario():
         with caplog.at_level(logging.ERROR):
-            await adapter._accept_invite(XmppInvite(ROOM.upper(), "Admin@Aversa.Run/phone", True))
-            await adapter._accept_invite(XmppInvite("denied@conference.aversa.run", "intruder@aversa.run", True))
+            await adapter._accept_invite(XmppInvite(ROOM.upper(), "Admin@Example.Com/phone", True))
+            await adapter._accept_invite(XmppInvite("denied@conference.example.com", "intruder@example.com", True))
 
     run(scenario())
     ordering.extend(client.calls)
@@ -438,7 +438,7 @@ def test_inbound_dedup_ttl_capacity_and_cross_chat_keys():
         message = lambda mid, chat=BOT: InboundXmppMessage(mid, chat, ADMIN, "Admin", "hello", False, None)
         await adapter._dispatch_message(message("same"))
         await adapter._dispatch_message(message("same"))
-        await adapter._dispatch_message(message("same", "bot2@aversa.run"))
+        await adapter._dispatch_message(message("same", "bot2@example.com"))
         await adapter._dispatch_message(message("second"))
         await adapter._dispatch_message(message("same"))  # evicted by capacity
         clock.now = 601

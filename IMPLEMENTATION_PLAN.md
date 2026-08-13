@@ -11,9 +11,9 @@
 ## Global Constraints
 
 - VPS: Ubuntu 24.04.1 LTS x86_64.
-- XMPP-домен: `aversa.run`; аккаунт бота: `hermes@aversa.run`; ресурс: `Hermes`.
-- Модель: `gpt-5.6-sol`; OpenAI-совместимый endpoint: `https://api.aitunnel.ru/v1`.
-- Разрешённые bare JID: `admin@aversa.run`, `yuklya@aversa.run`, `julia@aversa.run`.
+- XMPP-домен: `example.com`; аккаунт бота: `bot@example.com`; ресурс: `Hermes`.
+- Модель: `gpt-5.6-sol`; OpenAI-совместимый endpoint: `https://llm.example.com/v1`.
+- Разрешённые bare JID: `admin@example.com`, `alice@example.com`, `bob@example.com`.
 - В личке отвечать на каждое непустое текстовое сообщение разрешённого пользователя.
 - В MUC отвечать только разрешённому пользователю при обращении к боту или XEP-0461 reply на сообщение бота.
 - Принимать прямые и mediated приглашения в приватные MUC только от разрешённых JID; комнаты сохранять между перезапусками.
@@ -107,7 +107,7 @@ Use Slixmpp `JID` parsing when available; reject values without localpart or dom
 
 - [ ] **Step 3: Write failing mention tests**
 
-Cover `Hermes, вопрос`, `@Hermes вопрос`, `hermes@aversa.run вопрос`, unrelated text, substring `hermes` inside another word, self MUC nick, and XEP-0461 reply whose referenced ID is or is not in the bot-message cache.
+Cover `Hermes, вопрос`, `@Hermes вопрос`, `bot@example.com вопрос`, unrelated text, substring `hermes` inside another word, self MUC nick, and XEP-0461 reply whose referenced ID is or is not in the bot-message cache.
 
 Run: `pytest -q tests/test_policy.py -k mention`
 
@@ -141,7 +141,7 @@ git commit -m "feat: enforce XMPP authorization and mention policy"
 - Produces: `RoomState.load() -> frozenset[str]`.
 - Produces: `RoomState.add(room_jid: str) -> bool`.
 - Produces: `RoomState.remove(room_jid: str) -> bool`.
-- File schema: `{"version":1,"rooms":["room@conference.aversa.run"]}`.
+- File schema: `{"version":1,"rooms":["room@conference.example.com"]}`.
 
 - [ ] **Step 1: Write failing state tests**
 
@@ -301,8 +301,8 @@ Include nonsecret values:
 
 ```dotenv
 HERMES_HOME=/var/lib/hermes/.hermes
-XMPP_JID=hermes@aversa.run/Hermes
-XMPP_ALLOWED_USERS=admin@aversa.run,yuklya@aversa.run,julia@aversa.run
+XMPP_JID=bot@example.com/Hermes
+XMPP_ALLOWED_USERS=admin@example.com,alice@example.com,bob@example.com
 XMPP_NICK=Hermes
 XMPP_STATE_PATH=/var/lib/hermes/.hermes/xmpp/rooms.json
 ```
@@ -332,7 +332,7 @@ The script must:
 README commands must include:
 
 ```bash
-docker compose exec ejabberd ejabberdctl register hermes aversa.run
+docker compose exec ejabberd ejabberdctl register bot example.com
 sudo -u hermes -H env HERMES_HOME=/var/lib/hermes/.hermes hermes model
 sudo -u hermes -H env HERMES_HOME=/var/lib/hermes/.hermes hermes config set terminal.backend docker
 sudo -u hermes -H env HERMES_HOME=/var/lib/hermes/.hermes hermes doctor
@@ -365,7 +365,7 @@ git commit -m "ops: add secure Ubuntu deployment for Hermes XMPP"
 
 **Interfaces:**
 - Consumes: release archive from Tasks 1-6 and two user-entered secrets.
-- Produces: healthy `hermes-gateway.service` and connected `hermes@aversa.run/Hermes` session.
+- Produces: healthy `hermes-gateway.service` and connected `bot@example.com/Hermes` session.
 
 - [ ] **Step 1: Capture rollback state**
 
@@ -381,7 +381,7 @@ Expected: ejabberd healthy; Hermes may be absent before first install.
 
 - [ ] **Step 2: Install and configure without starting**
 
-Run the reviewed installer, configure `hermes model` with endpoint `https://api.aitunnel.ru/v1` and model `gpt-5.6-sol`, enter the API key only in the interactive secret prompt, then edit `/etc/hermes/hermes.env` using `sudoedit` to add only `XMPP_PASSWORD` and required provider secret.
+Run the reviewed installer, configure `hermes model` with endpoint `https://llm.example.com/v1` and model `gpt-5.6-sol`, enter the API key only in the interactive secret prompt, then edit `/etc/hermes/hermes.env` using `sudoedit` to add only `XMPP_PASSWORD` and required provider secret.
 
 - [ ] **Step 3: Verify permissions and configuration**
 
@@ -403,7 +403,7 @@ Run:
 sudo systemctl enable --now hermes-gateway
 sudo systemctl is-active hermes-gateway
 sudo journalctl -u hermes-gateway -n 100 --no-pager
-docker compose exec ejabberd ejabberdctl connected_users | grep -F 'hermes@aversa.run'
+docker compose exec ejabberd ejabberdctl connected_users | grep -F 'bot@example.com'
 ```
 
 Expected: service `active`, bot appears connected, logs contain no secret values.
@@ -433,7 +433,7 @@ Rollback command:
 sudo systemctl disable --now hermes-gateway
 ```
 
-This must leave ejabberd, its rooms and other accounts untouched. Deleting `hermes@aversa.run` is a separate explicit operation and is not part of routine rollback.
+This must leave ejabberd, its rooms and other accounts untouched. Deleting `bot@example.com` is a separate explicit operation and is not part of routine rollback.
 
 - [ ] **Step 8: Final repository verification**
 

@@ -25,30 +25,30 @@ def test_add_canonicalizes_resource_and_writes_sorted_schema(tmp_path):
     path = tmp_path / "rooms.json"
     state = RoomState(path)
 
-    assert state.add("Zulu@Conference.Aversa.Run/desktop") is True
-    assert state.add("alpha@conference.aversa.run") is True
+    assert state.add("Zulu@Conference.Example.Com/desktop") is True
+    assert state.add("alpha@conference.example.com") is True
 
-    assert state.load() == frozenset({"alpha@conference.aversa.run", "zulu@conference.aversa.run"})
+    assert state.load() == frozenset({"alpha@conference.example.com", "zulu@conference.example.com"})
     assert path.read_text(encoding="utf-8") == (
-        '{"version":1,"rooms":["alpha@conference.aversa.run","zulu@conference.aversa.run"]}\n'
+        '{"version":1,"rooms":["alpha@conference.example.com","zulu@conference.example.com"]}\n'
     )
 
 
 def test_duplicate_add_and_absent_remove_do_not_rewrite_state_file(tmp_path):
     path = tmp_path / "rooms.json"
     state = RoomState(path)
-    assert state.add("room@conference.aversa.run") is True
+    assert state.add("room@conference.example.com") is True
     before = path.read_bytes()
 
-    assert state.add("ROOM@CONFERENCE.AVERSA.RUN/resource") is False
-    assert state.remove("other@conference.aversa.run") is False
+    assert state.add("ROOM@CONFERENCE.EXAMPLE.COM/resource") is False
+    assert state.remove("other@conference.example.com") is False
 
     assert path.read_bytes() == before
-    assert state.remove("room@conference.aversa.run") is True
+    assert state.remove("room@conference.example.com") is True
     assert state.load() == frozenset()
 
 
-@pytest.mark.parametrize("value", ["", " ", "not-a-jid", "@conference.aversa.run", "room@"])
+@pytest.mark.parametrize("value", ["", " ", "not-a-jid", "@conference.example.com", "room@"])
 def test_add_and_remove_reject_invalid_room_jids(tmp_path, value):
     state = RoomState(tmp_path / "rooms.json")
 
@@ -61,7 +61,7 @@ def test_add_and_remove_reject_invalid_room_jids(tmp_path, value):
 def test_write_creates_restrictive_parent_and_state_file(tmp_path):
     path = tmp_path / "private" / "rooms.json"
 
-    assert RoomState(path).add("room@conference.aversa.run") is True
+    assert RoomState(path).add("room@conference.example.com") is True
     assert path.exists()
     if os.name == "nt":
         pytest.skip("POSIX permission bits are not enforceable on Windows")
@@ -86,7 +86,7 @@ def test_write_uses_same_directory_tempfile_flushes_fsyncs_and_replaces(tmp_path
     monkeypatch.setattr("xmpp_bridge.state.os.fsync", tracking_fsync)
     monkeypatch.setattr("xmpp_bridge.state.os.replace", tracking_replace)
 
-    assert RoomState(path).add("room@conference.aversa.run") is True
+    assert RoomState(path).add("room@conference.example.com") is True
     source, destination = calls["replace"].pop()
     assert source.parent == path.parent
     assert destination == path
@@ -96,7 +96,7 @@ def test_write_uses_same_directory_tempfile_flushes_fsyncs_and_replaces(tmp_path
 def test_failed_atomic_replace_keeps_original_file_and_in_memory_state(tmp_path, monkeypatch):
     path = tmp_path / "rooms.json"
     state = RoomState(path)
-    assert state.add("room@conference.aversa.run") is True
+    assert state.add("room@conference.example.com") is True
     before = path.read_bytes()
 
     def fail_replace(source, destination):
@@ -104,17 +104,17 @@ def test_failed_atomic_replace_keeps_original_file_and_in_memory_state(tmp_path,
 
     monkeypatch.setattr("xmpp_bridge.state.os.replace", fail_replace)
     with pytest.raises(OSError, match="disk error"):
-        state.add("other@conference.aversa.run")
+        state.add("other@conference.example.com")
 
     assert path.read_bytes() == before
-    assert state.load() == frozenset({"room@conference.aversa.run"})
+    assert state.load() == frozenset({"room@conference.example.com"})
     assert list(path.parent.glob("*.tmp")) == []
 
 
 def test_write_does_not_report_failure_after_successful_replace(tmp_path, monkeypatch):
     path = tmp_path / "rooms.json"
     state = RoomState(path)
-    assert state.add("room@conference.aversa.run") is True
+    assert state.add("room@conference.example.com") is True
 
     replaced = False
     real_replace = os.replace
@@ -131,14 +131,14 @@ def test_write_does_not_report_failure_after_successful_replace(tmp_path, monkey
     monkeypatch.setattr("xmpp_bridge.state.os.replace", track_replace)
     monkeypatch.setattr("xmpp_bridge.state.os.chmod", fail_chmod)
 
-    assert state.add("other@conference.aversa.run") is True
-    assert state.load() == frozenset({"room@conference.aversa.run", "other@conference.aversa.run"})
+    assert state.add("other@conference.example.com") is True
+    assert state.load() == frozenset({"room@conference.example.com", "other@conference.example.com"})
 
 
 def test_transient_read_error_preserves_file_and_valid_in_memory_state(tmp_path, monkeypatch):
     path = tmp_path / "rooms.json"
     state = RoomState(path)
-    assert state.add("room@conference.aversa.run") is True
+    assert state.add("room@conference.example.com") is True
     before = path.read_bytes()
     real_read_bytes = Path.read_bytes
 
@@ -150,7 +150,7 @@ def test_transient_read_error_preserves_file_and_valid_in_memory_state(tmp_path,
         state.load()
 
     assert real_read_bytes(path) == before
-    assert state._rooms == frozenset({"room@conference.aversa.run"})
+    assert state._rooms == frozenset({"room@conference.example.com"})
     assert list(tmp_path.glob("rooms.json.corrupt-*")) == []
 
 
@@ -202,7 +202,7 @@ def test_corrupt_json_retries_quarantine_name_after_racing_reservation(tmp_path,
 def test_quarantine_does_not_delete_state_replaced_during_move(tmp_path, monkeypatch):
     path = tmp_path / "rooms.json"
     path.write_text("{not json", encoding="utf-8")
-    replacement = '{"version":1,"rooms":["new@conference.aversa.run"]}\n'
+    replacement = '{"version":1,"rooms":["new@conference.example.com"]}\n'
     real_replace = os.replace
     raced = False
 
@@ -227,7 +227,7 @@ def test_quarantine_does_not_delete_state_replaced_during_move(tmp_path, monkeyp
 def test_quarantine_reloads_state_replaced_before_link(tmp_path, monkeypatch):
     path = tmp_path / "rooms.json"
     path.write_text("{not json", encoding="utf-8")
-    replacement = '{"version":1,"rooms":["new@conference.aversa.run"]}\n'
+    replacement = '{"version":1,"rooms":["new@conference.example.com"]}\n'
     real_link = os.link
     real_replace = os.replace
     raced = False
@@ -243,7 +243,7 @@ def test_quarantine_reloads_state_replaced_before_link(tmp_path, monkeypatch):
 
     monkeypatch.setattr("xmpp_bridge.state.os.link", race_link)
 
-    assert RoomState(path).load() == frozenset({"new@conference.aversa.run"})
+    assert RoomState(path).load() == frozenset({"new@conference.example.com"})
     assert path.read_text(encoding="utf-8") == replacement
     assert list(tmp_path.glob("rooms.json.corrupt-*")) == []
 
@@ -267,10 +267,10 @@ def test_failed_quarantine_move_removes_empty_reservation(tmp_path, monkeypatch)
 def test_failed_load_preserves_previously_valid_in_memory_rooms(tmp_path):
     path = tmp_path / "rooms.json"
     state = RoomState(path)
-    assert state.add("room@conference.aversa.run") is True
+    assert state.add("room@conference.example.com") is True
     path.write_text('{"version":1,"rooms":[42]}', encoding="utf-8")
 
-    assert state.load() == frozenset({"room@conference.aversa.run"})
+    assert state.load() == frozenset({"room@conference.example.com"})
     assert not path.exists()
     assert len(list(tmp_path.glob("rooms.json.corrupt-*"))) == 1
 
@@ -280,7 +280,7 @@ def test_failed_load_preserves_previously_valid_in_memory_rooms(tmp_path):
     [
         "[]",
         '{"version":"1","rooms":[]}',
-        '{"version":1,"rooms":"room@conference.aversa.run"}',
+        '{"version":1,"rooms":"room@conference.example.com"}',
         '{"version":1,"rooms":[42]}',
         '{"version":1,"rooms":["not-a-jid"]}',
         '{"version":1,"rooms":[],"extra":true}',
@@ -298,8 +298,8 @@ def test_load_quarantines_invalid_schema(tmp_path, payload):
 def test_load_canonicalizes_duplicate_and_resource_bearing_room_entries(tmp_path):
     path = tmp_path / "rooms.json"
     path.write_text(
-        '{"version":1,"rooms":["Room@Conference.Aversa.Run/desktop","room@conference.aversa.run"]}',
+        '{"version":1,"rooms":["Room@Conference.Example.Com/desktop","room@conference.example.com"]}',
         encoding="utf-8",
     )
 
-    assert RoomState(path).load() == frozenset({"room@conference.aversa.run"})
+    assert RoomState(path).load() == frozenset({"room@conference.example.com"})
