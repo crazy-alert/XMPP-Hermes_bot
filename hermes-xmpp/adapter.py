@@ -81,7 +81,11 @@ def validate_config(config):
 
 
 def check_requirements():
-    return validate_config(PlatformConfig())
+    try:
+        import slixmpp  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def _env_enablement():
@@ -102,7 +106,7 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         self.room_state = RoomState(state_path)
         self._inbound = _TtlCache(600, cache_capacity, monotonic)
         self._outbound = _TtlCache(86400, cache_capacity, monotonic)
-        client_config = XmppClientConfig(jid, password, self.nick, self.room_state, host, port)
+        client_config = XmppClientConfig(jid, password, self.nick, self.room_state, host, port, host is not None)
         self.client = client_factory(client_config, self._schedule_message, self._schedule_invite)
 
     def _schedule_message(self, message):
@@ -151,7 +155,8 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         key = (chat, message.message_id)
         if not message.message_id or self._inbound.contains(key):
             return
-        routed = (route_group(message, self.allowed_users, self.bot_jid, self.nick, self._outbound.ids_for(chat))
+        room_nick = message.room_nick or self.nick
+        routed = (route_group(message, self.allowed_users, self.bot_jid, room_nick, self._outbound.ids_for(chat))
                   if message.is_group else route_direct(message, self.allowed_users))
         if routed is None:
             return

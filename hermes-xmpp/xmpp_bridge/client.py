@@ -30,6 +30,7 @@ class XmppClientConfig:
     room_state: RoomState
     host: str | None = None
     port: int | None = None
+    direct_tls: bool = False
 
     def __post_init__(self) -> None:
         normalize_bare_jid(self.bot_jid)
@@ -41,6 +42,8 @@ class XmppClientConfig:
             raise ValueError("XMPP host must be nonempty when supplied")
         if self.port is not None and (type(self.port) is not int or not 1 <= self.port <= 65535):
             raise ValueError("XMPP port must be between 1 and 65535")
+        if type(self.direct_tls) is not bool:
+            raise ValueError("XMPP direct TLS flag must be a boolean")
 
 
 MessageCallback = Callable[[InboundXmppMessage], object]
@@ -102,7 +105,7 @@ class HermesXmppClient(ClientXMPP):
         for event_name in error_events:
             self.add_event_handler(event_name, terminal_failure)
         try:
-            result = self.connect(self.config.host, self.config.port)
+            result = self.connect(self.config.host, self.config.port, **self._connect_kwargs())
             if inspect.isawaitable(result):
                 attempt_observer = asyncio.create_task(observe_connection_attempt(result))
             else:
@@ -206,7 +209,18 @@ class HermesXmppClient(ClientXMPP):
         sender = self._muc_sender(stanza)
         if sender is None:
             return
-        self._emit_message(InboundXmppMessage(message_id, room, sender, nick, body, True, self._reply_id(stanza)))
+        self._emit_message(
+            InboundXmppMessage(
+                message_id,
+                room,
+                sender,
+                nick,
+                body,
+                True,
+                self._reply_id(stanza),
+                self._room_nicks.get(room, self.config.nick),
+            )
+        )
 
     def _handle_mediated_invite(self, stanza: object) -> None:
         if not self._is_message(stanza):
@@ -249,7 +263,7 @@ class HermesXmppClient(ClientXMPP):
             await self._sleep(self._next_reconnect_delay())
             if self._intentional_disconnect:
                 return
-            result = self.connect(self.config.host, self.config.port)
+            result = self.connect(self.config.host, self.config.port, **self._connect_kwargs())
             if inspect.isawaitable(result):
                 await result
         finally:
@@ -268,6 +282,9 @@ class HermesXmppClient(ClientXMPP):
         delay = self.RECONNECT_DELAYS[min(self._reconnect_index, len(self.RECONNECT_DELAYS) - 1)]
         self._reconnect_index += 1
         return delay
+
+    def _connect_kwargs(self) -> dict[str, bool]:
+        return {"use_ssl": True} if self.config.direct_tls else {}
 
     def _send_chunks(self, recipient: str, body: str, message_type: str) -> list[str]:
         if not isinstance(body, str) or not body:

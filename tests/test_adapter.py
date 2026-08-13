@@ -201,6 +201,7 @@ def test_contract_connect_disconnect_marks_and_uses_verified_client_config():
     assert client.config.password == PASSWORD
     assert client.config.nick == "Hermes"
     assert client.config.host is None and client.config.port is None
+    assert client.config.direct_tls is False
     assert client.config.room_state.path == Path(os.environ["HERMES_HOME"]) / "xmpp" / "rooms.json"
 
 
@@ -257,6 +258,7 @@ def test_config_direct_tls_defaults_port_only_with_explicit_host(monkeypatch, tm
     direct = make_adapter()
     assert FakeClient.instances[-1].config.host == "xmpp.example.test"
     assert FakeClient.instances[-1].config.port == 5223
+    assert FakeClient.instances[-1].config.direct_tls is True
 
     monkeypatch.setenv("XMPP_PORT", "7443")
     explicit = make_adapter()
@@ -269,6 +271,7 @@ def test_config_direct_tls_defaults_port_only_with_explicit_host(monkeypatch, tm
     discovery = make_adapter()
     cfg = FakeClient.instances[-1].config
     assert cfg.host is None and cfg.port is None
+    assert cfg.direct_tls is False
     assert cfg.nick == "Relay"
     assert discovery.room_state.path == tmp_path / "custom" / "rooms.json"
 
@@ -289,7 +292,7 @@ def test_config_rejects_port_without_direct_host(monkeypatch):
         make_adapter()
 
 
-def test_register_uses_official_platform_contract():
+def test_register_uses_official_platform_contract(monkeypatch):
     calls = []
     ctx = types.SimpleNamespace(register_platform=lambda **kwargs: calls.append(kwargs))
 
@@ -315,6 +318,33 @@ def test_register_uses_official_platform_contract():
     seed = registered["env_enablement_fn"]()
     assert seed == {"jid": BOT, "password": PASSWORD, "allowed_users": ADMIN}
     assert isinstance(registered["adapter_factory"](PlatformConfig()), adapter_module.XmppPlatformAdapter)
+
+    for name in ("XMPP_JID", "XMPP_PASSWORD", "XMPP_ALLOWED_USERS"):
+        monkeypatch.delenv(name)
+    assert registered["check_fn"]() is True
+    assert registered["validate_config"](PlatformConfig()) is False
+
+
+def test_group_routing_uses_actual_room_nick_after_collision():
+    adapter = make_adapter()
+
+    async def scenario():
+        await adapter._dispatch_message(
+            InboundXmppMessage(
+                "collision-1", ROOM, ADMIN, "Admin", "Hermes_2: actual nick", True, None, "Hermes_2"
+            )
+        )
+        await adapter._dispatch_message(
+            InboundXmppMessage(
+                "collision-2", ROOM, ADMIN, "Admin", "Hermes: configured nick", True, None, "Hermes_2"
+            )
+        )
+
+    run(scenario())
+
+    assert [(event.message_id, event.text, event.user_id) for event in adapter.events] == [
+        ("collision-1", "actual nick", ADMIN)
+    ]
 
 
 def test_dm_and_muc_events_have_exact_hermes_source_and_secret_free_fields():

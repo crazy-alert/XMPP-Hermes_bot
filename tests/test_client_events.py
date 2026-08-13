@@ -4,7 +4,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import pytest
-from slixmpp import Message
+from slixmpp import Message, Presence
 
 
 ROOT = Path(__file__).parents[1]
@@ -91,7 +91,25 @@ def test_group_message_uses_room_bare_sender_bare_and_actual_own_nick(tmp_path):
     client._handle_group_message(group_stanza(sender=f"{ROOM}/Hermes_2", message_id="own"))
 
     assert received == [
-        InboundXmppMessage("muc-1", ROOM, "admin@aversa.run", "Admin", "hello", True, None)
+        InboundXmppMessage("muc-1", ROOM, "admin@aversa.run", "Admin", "hello", True, None, "Hermes_2")
+    ]
+
+
+def test_nick_collision_presence_updates_nick_carried_by_real_group_stanza(tmp_path):
+    received = []
+    client = make_client(tmp_path, on_message=received.append)
+    presence = Presence()
+    presence["from"] = f"{ROOM}/Hermes_2"
+    presence.enable("muc")
+    presence["muc"]["status_codes"] = {110, 210}
+
+    client._handle_group_presence(presence)
+    client._handle_group_message(group_stanza(sender=f"{ROOM}/Admin", body="Hermes_2: question"))
+
+    assert received == [
+        InboundXmppMessage(
+            "muc-1", ROOM, "admin@aversa.run", "Admin", "Hermes_2: question", True, None, "Hermes_2"
+        )
     ]
 
 
@@ -209,14 +227,14 @@ def test_typing_stanzas_use_chat_states_for_direct_and_group_targets(tmp_path):
 def test_connect_and_wait_waits_for_session_start_not_tcp_future(tmp_path, caplog):
     async def scenario():
         client = HermesXmppClient(
-            XmppClientConfig(BOT_JID, "not-a-real-password", "Hermes", RoomState(tmp_path / "rooms.json"), "xmpp.example.test", 5223),
+            XmppClientConfig(BOT_JID, "not-a-real-password", "Hermes", RoomState(tmp_path / "rooms.json"), "xmpp.example.test", 5223, True),
             lambda event: None,
             lambda event: None,
         )
         connected = []
 
-        def connect(host=None, port=None):
-            connected.append((host, port))
+        def connect(host=None, port=None, **kwargs):
+            connected.append((host, port, kwargs))
             tcp_connected = asyncio.get_running_loop().create_future()
             tcp_connected.set_result(None)
             return tcp_connected
@@ -227,7 +245,7 @@ def test_connect_and_wait_waits_for_session_start_not_tcp_future(tmp_path, caplo
 
         ready = asyncio.create_task(client.connect_and_wait())
         await asyncio.sleep(0)
-        assert connected == [("xmpp.example.test", 5223)]
+        assert connected == [("xmpp.example.test", 5223, {"use_ssl": True})]
         assert not ready.done()
 
         client.event("session_start")
@@ -410,6 +428,40 @@ def test_unexpected_connection_lost_schedules_exact_reconnect_sequence_and_reset
 
         assert delays == [1, 2, 5, 10, 30, 60, 60, 1]
         assert len(reconnects) == 8
+        await client.stop()
+
+    asyncio.run(scenario())
+
+
+def test_direct_tls_reconnect_passes_use_ssl_to_real_connect_call(tmp_path):
+    async def scenario():
+        client = HermesXmppClient(
+            XmppClientConfig(
+                BOT_JID,
+                "not-a-real-password",
+                "Hermes",
+                RoomState(tmp_path / "rooms.json"),
+                "xmpp.example.test",
+                5223,
+                True,
+            ),
+            lambda event: None,
+            lambda event: None,
+        )
+        reconnects = []
+        client._sleep = lambda delay: asyncio.sleep(0)
+
+        def connect(host=None, port=None, **kwargs):
+            reconnects.append((host, port, kwargs))
+            completed = asyncio.get_running_loop().create_future()
+            completed.set_result(None)
+            return completed
+
+        client.connect = connect
+
+        await client._reconnect_after_delay()
+
+        assert reconnects == [("xmpp.example.test", 5223, {"use_ssl": True})]
         await client.stop()
 
     asyncio.run(scenario())
