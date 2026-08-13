@@ -19,6 +19,12 @@ from xmpp_bridge.admin_state import AdminConfig, AdminState, AdminStateError, Co
 OWNER = "Owner@Example.Com/phone"
 
 
+@pytest.fixture(autouse=True)
+def require_posix_persistence(request):
+    if os.name == "nt" and request.node.name != "test_windows_persistent_mutation_fails_closed":
+        pytest.skip("persistent AdminState is POSIX/Linux-only")
+
+
 def _process_mutate(path, field, start, result):
     from xmpp_bridge.admin_state import AdminState
     start.wait(10)
@@ -96,6 +102,7 @@ def test_set_token_persists_secret_but_exposes_only_mask(tmp_path):
 
 def test_atomic_write_uses_private_mode_fsync_and_replace(tmp_path, monkeypatch):
     path = tmp_path / "nested" / "admin.json"
+    path.parent.mkdir()
     state = AdminState(path, OWNER)
     calls = {"fsync": 0, "replace": []}
     real_fsync, real_replace = os.fsync, os.replace
@@ -104,16 +111,18 @@ def test_atomic_write_uses_private_mode_fsync_and_replace(tmp_path, monkeypatch)
         calls["fsync"] += 1
         return real_fsync(fd)
 
-    def replace(source, destination):
+    def replace(source, destination, **kwargs):
         calls["replace"].append((Path(source), Path(destination)))
-        return real_replace(source, destination)
+        assert kwargs["src_dir_fd"] == kwargs["dst_dir_fd"]
+        return real_replace(source, destination, **kwargs)
 
     monkeypatch.setattr("xmpp_bridge.admin_state.os.fsync", fsync)
     monkeypatch.setattr("xmpp_bridge.admin_state.os.replace", replace)
     state.load()
 
-    assert calls["replace"][-1][0].parent == path.parent
-    assert calls["replace"][-1][1] == path
+    source, destination = calls["replace"][-1]
+    assert source.parent == Path(".") and source.name.startswith(".admin.json.") and source.suffix == ".tmp"
+    assert destination == Path("admin.json")
     assert calls["fsync"] >= 1
     if os.name != "nt":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -176,7 +185,7 @@ def test_failed_replace_preserves_prior_complete_state(tmp_path, monkeypatch):
     state.load()
     before = path.read_bytes()
 
-    def fail_replace(source, destination):
+    def fail_replace(source, destination, **_kwargs):
         raise OSError("interrupted replace")
 
     monkeypatch.setattr("xmpp_bridge.admin_state.os.replace", fail_replace)
@@ -286,3 +295,13 @@ def test_windows_file_information_abi_is_exact():
     assert ctypes.sizeof(info) == 52
     assert info.dwVolumeSerialNumber.offset == 28
     assert info.nFileIndexHigh.offset == 44
+
+
+def test_windows_persistent_mutation_fails_closed(tmp_path, monkeypatch):
+    if os.name != "nt":
+        pytest.skip("Windows-only support boundary")
+    monkeypatch.setattr("xmpp_bridge.admin_state._PERSISTENT_PLATFORM", False)
+    state = AdminState(tmp_path / "admin.json", OWNER)
+
+    with pytest.raises(AdminStateError, match="requires POSIX/Linux"):
+        state.load()

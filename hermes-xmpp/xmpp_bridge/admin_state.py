@@ -9,12 +9,14 @@ import json
 import os
 from pathlib import Path
 import stat
-import tempfile
 import threading
 import time
 from urllib.parse import urlparse
 
 from .policy import normalize_bare_jid
+
+
+_PERSISTENT_PLATFORM = os.name != "nt"
 
 
 class AdminStateError(RuntimeError):
@@ -82,8 +84,9 @@ class AdminState:
         self._binding: _ParentBinding | None = None
 
     def load(self) -> AdminConfig:
+        _require_persistent_platform()
         with self._locked():
-            if not self.path.exists() and not self.path.is_symlink():
+            if not _child_exists(self.path.name, self._binding):
                 config, token = _validate(self._first_payload())
                 self._write(config, token)
                 return config
@@ -91,13 +94,15 @@ class AdminState:
             return config
 
     def token(self) -> str | None:
+        _require_persistent_platform()
         with self._locked():
-            if not self.path.exists() and not self.path.is_symlink():
+            if not _child_exists(self.path.name, self._binding):
                 return None
             _, token = self._read()
             return token
 
     def mutate(self, transform) -> AdminConfig:
+        _require_persistent_platform()
         with self._locked():
             config, token = self._read_or_initial()
             proposed = transform(config)
@@ -108,6 +113,7 @@ class AdminState:
             return persisted
 
     def set_token(self, secret: str) -> AdminConfig:
+        _require_persistent_platform()
         if not isinstance(secret, str) or not secret:
             raise ConfigValidationError("token must be nonempty")
         with self._locked():
@@ -117,7 +123,7 @@ class AdminState:
             return persisted
 
     def _read_or_initial(self) -> tuple[AdminConfig, str | None]:
-        if not self.path.exists() and not self.path.is_symlink():
+        if not _child_exists(self.path.name, self._binding):
             config, token = _validate(self._first_payload())
             return config, token
         return self._read()
@@ -125,7 +131,7 @@ class AdminState:
     def _read(self) -> tuple[AdminConfig, str | None]:
         self._check_parent()
         try:
-            with _open_regular(self.path, os.O_RDONLY, self._binding) as source:
+            with _open_regular(self.path.name, os.O_RDONLY, self._binding) as source:
                 payload = json.loads(source.read().decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ConfigValidationError("invalid admin state") from error
@@ -136,33 +142,30 @@ class AdminState:
 
     def _write(self, config: AdminConfig, token: str | None) -> None:
         parent = self.path.parent
-        _ensure_safe_parent(parent)
         self._check_parent()
-        _reject_unsafe(self.path, file=True, allow_missing=True)
+        if self._binding is None:
+            raise AdminStateError("missing admin state parent binding")
         contents = json.dumps(_payload(config, token, config.revision), separators=(",", ":"), ensure_ascii=False) + "\n"
-        temporary_name: str | None = None
+        temporary_name = f".{self.path.name}.{os.urandom(16).hex()}.tmp"
+        temporary_fd: int | None = None
         try:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent, prefix=f".{self.path.name}.", suffix=".tmp", delete=False) as temporary:
-                temporary_name = temporary.name
-                if os.name != "nt":
-                    os.chmod(temporary_name, 0o600)
-                temporary.write(contents)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            self._check_parent()
-            if os.name != "nt" and self._binding is not None:
-                os.replace(Path(temporary_name).name, self.path.name, src_dir_fd=self._binding._dir_fd, dst_dir_fd=self._binding._dir_fd)
-            else:
-                os.replace(temporary_name, self.path)
-            temporary_name = None
-            self._check_parent()
-            if os.name != "nt":
-                os.chmod(self.path, 0o600)
-                _fsync_dir(parent)
+            temporary_fd = os.open(temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self._binding._dir_fd)
+            os.write(temporary_fd, contents.encode("utf-8"))
+            os.fchmod(temporary_fd, 0o600)
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = None
+            os.replace(temporary_name, self.path.name, src_dir_fd=self._binding._dir_fd, dst_dir_fd=self._binding._dir_fd)
+            temporary_name = ""
+            _chmod_child(self.path.name, 0o600, self._binding)
+            os.fsync(self._binding._dir_fd)
         finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
             if temporary_name is not None:
                 try:
-                    os.unlink(temporary_name)
+                    if temporary_name:
+                        os.unlink(temporary_name, dir_fd=self._binding._dir_fd)
                 except FileNotFoundError:
                     pass
 
@@ -250,35 +253,53 @@ def _reject_unsafe(path: Path, *, file: bool, allow_missing: bool = False) -> No
 
 
 @contextmanager
-def _open_regular(path: Path, flags: int, binding: _ParentBinding | None = None):
+def _open_regular(name: str, flags: int, binding: _ParentBinding | None = None):
     """Open a regular non-link file and bind the checked identity to its handle."""
-    expected = os.lstat(path)
-    if not stat.S_ISREG(expected.st_mode):
-        raise AdminStateError("unsafe admin state path")
+    if binding is None or binding._dir_fd is None:
+        raise AdminStateError("missing admin state parent binding")
     open_flags = flags
     if hasattr(os, "O_NOFOLLOW"):
         open_flags |= os.O_NOFOLLOW
-    name, dir_fd = binding.child(path) if os.name != "nt" and binding is not None else (path, None)
-    descriptor = os.open(name, open_flags, dir_fd=dir_fd)
+    descriptor = os.open(name, open_flags, dir_fd=binding._dir_fd)
     try:
         actual = os.fstat(descriptor)
-        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino) or not stat.S_ISREG(actual.st_mode):
-            raise AdminStateError("admin state path changed while opening")
+        if not stat.S_ISREG(actual.st_mode):
+            raise AdminStateError("unsafe admin state path")
         yield os.fdopen(descriptor, "rb", closefd=False)
     finally:
         os.close(descriptor)
 
 
 def _ensure_safe_parent(parent: Path) -> None:
-    """Create a private parent only after rejecting every existing symlink ancestor."""
-    for ancestor in (parent, *parent.parents):
-        if ancestor.exists() or ancestor.is_symlink():
-            _reject_unsafe(ancestor, file=False)
-    if not parent.exists():
-        parent.mkdir(mode=0o700, parents=True)
-        if os.name != "nt":
-            os.chmod(parent, 0o700)
+    """Persistent state requires a pre-provisioned, non-link parent directory."""
+    if not parent.exists() or parent.is_symlink():
+        raise AdminStateError("admin state parent must be a pre-provisioned directory")
     _reject_unsafe(parent, file=False)
+
+
+def _require_persistent_platform() -> None:
+    if not _PERSISTENT_PLATFORM:
+        raise AdminStateError("persistent state requires POSIX/Linux")
+
+
+def _child_exists(name: str, binding: _ParentBinding | None) -> bool:
+    if binding is None or binding._dir_fd is None:
+        raise AdminStateError("missing admin state parent binding")
+    try:
+        os.stat(name, dir_fd=binding._dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _chmod_child(name: str, mode: int, binding: _ParentBinding) -> None:
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=binding._dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise AdminStateError("unsafe admin state path")
+        os.fchmod(descriptor, mode)
+    finally:
+        os.close(descriptor)
 
 
 class _ParentBinding:
@@ -400,9 +421,8 @@ def _acquire_lock(lock: Path, binding: _ParentBinding) -> int:
         # check before any name-based operation is attempted.
         binding.check()
         try:
-            descriptor = os.open(lock, flags, 0o600)
+            descriptor = os.open(lock.name, flags, 0o600, dir_fd=binding._dir_fd)
         except FileExistsError:
-            _reject_unsafe(lock, file=True)
             if _recover_dead_lock(lock, binding):
                 continue
             if time.monotonic() >= deadline:
@@ -427,27 +447,28 @@ def _release_lock(lock: Path, descriptor: int, binding: _ParentBinding) -> None:
     try:
         binding.check()
         binding.check()
-        current = lock.stat(follow_symlinks=False)
+        current = os.stat(lock.name, dir_fd=binding._dir_fd, follow_symlinks=False)
     except FileNotFoundError:
         return
     if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
-        os.unlink(lock)
+        os.unlink(lock.name, dir_fd=binding._dir_fd)
 
 
 def _recover_dead_lock(lock: Path, binding: _ParentBinding) -> bool:
     """Remove only a definitely dead, unchanged lock file; unknown locks stay live."""
     try:
-        original = os.stat(lock, follow_symlinks=False)
-        data = json.loads(lock.read_text(encoding="utf-8"))
+        original = os.stat(lock.name, dir_fd=binding._dir_fd, follow_symlinks=False)
+        with _open_regular(lock.name, os.O_RDONLY, binding) as source:
+            data = json.loads(source.read().decode("utf-8"))
         pid = data.get("pid") if isinstance(data, dict) else None
         if type(pid) is not int or pid <= 0 or _pid_exists(pid):
             return False
         binding.check()
         binding.check()
-        current = os.stat(lock, follow_symlinks=False)
+        current = os.stat(lock.name, dir_fd=binding._dir_fd, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino):
             return False
-        os.unlink(lock)
+        os.unlink(lock.name, dir_fd=binding._dir_fd)
         return True
     except (OSError, ValueError, json.JSONDecodeError):
         return False
