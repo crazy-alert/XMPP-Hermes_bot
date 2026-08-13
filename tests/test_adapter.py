@@ -115,12 +115,32 @@ sys.modules[spec.name] = adapter_module
 spec.loader.exec_module(adapter_module)
 
 from xmpp_bridge.models import InboundXmppMessage, XmppInvite
+from xmpp_bridge.admin_state import AdminConfig
+from xmpp_bridge.commands import CommandResult, RestartGateway
 
 
 BOT = "bot@example.com/Hermes"
 ADMIN = "admin@example.com"
 ROOM = "private@conference.example.com"
 PASSWORD = "super-secret-password"
+
+
+class MemoryAdminState:
+    def __init__(self, owners=frozenset({ADMIN}), trusted=frozenset()):
+        self.config = AdminConfig(frozenset(owners), frozenset(trusted), None, None, None, False)
+
+    def load(self):
+        return self.config
+
+
+class RecordingRouter:
+    def __init__(self, result):
+        self.result = result
+        self.messages = []
+
+    def handle(self, message):
+        self.messages.append(message)
+        return self.result
 
 
 class FakeClient:
@@ -180,6 +200,7 @@ def clean_environment(monkeypatch, tmp_path):
 
 
 def make_adapter(**kwargs):
+    kwargs.setdefault("admin_state", MemoryAdminState())
     return adapter_module.XmppPlatformAdapter(PlatformConfig(), client_factory=FakeClient, **kwargs)
 
 
@@ -235,6 +256,126 @@ def test_contract_forbidden_dm_and_muc_never_reach_handle_message():
 
     run(scenario())
     assert adapter.events == []
+
+
+def test_dm_command_reply_bypasses_failing_hermes_and_calls_supervisor_after_send():
+    ordering = []
+    router = RecordingRouter(CommandResult(True, "ready", RestartGateway()))
+    adapter = make_adapter(command_router=router, supervisor=lambda event: ordering.append(("control", event)))
+    client = FakeClient.instances[-1]
+    original_send = client.send_direct
+
+    async def send_direct(jid, body):
+        ordering.append(("reply", jid, body))
+        return await original_send(jid, body)
+
+    client.send_direct = send_direct
+
+    async def exploding_hermes(_event):
+        raise AssertionError("command must not create Hermes MessageEvent")
+
+    adapter.handle_message = exploding_hermes
+    run(adapter._dispatch_message(InboundXmppMessage("command-1", BOT, ADMIN, "Admin", "ping", False, None)))
+
+    assert router.messages and adapter.events == []
+    assert ordering == [("reply", ADMIN, "ready"), ("control", RestartGateway())]
+
+
+@pytest.mark.parametrize(("body", "expected"), [("  PiNg  ", "pong"), ("/status", "model=")])
+def test_real_admin_router_works_without_provider_or_hermes_dispatch(body, expected):
+    adapter = make_adapter(command_router=None)
+
+    async def exploding_hermes(_event):
+        raise AssertionError("admin command must not create Hermes MessageEvent")
+
+    adapter.handle_message = exploding_hermes
+    run(adapter._dispatch_message(InboundXmppMessage("admin-1", BOT, ADMIN, "Admin", body, False, None)))
+
+    call = FakeClient.instances[-1].calls[0]
+    assert call[:2] == ("send_direct", ADMIN)
+    assert expected in call[2]
+    assert adapter.events == []
+
+
+@pytest.mark.parametrize("result", [object(), CommandResult(True, None, RestartGateway())])
+def test_invalid_or_replyless_command_result_fails_closed(result):
+    controls = []
+    adapter = make_adapter(
+        command_router=RecordingRouter(result),
+        supervisor=lambda event: controls.append(event),
+    )
+
+    run(adapter._dispatch_message(InboundXmppMessage("invalid-result", BOT, ADMIN, "Admin", "/restart", False, None)))
+
+    assert adapter.events == []
+    assert FakeClient.instances[-1].calls == []
+    assert controls == []
+
+
+def test_failed_command_reply_never_emits_control_event():
+    controls = []
+    adapter = make_adapter(
+        command_router=RecordingRouter(CommandResult(True, "reply", RestartGateway())),
+        supervisor=lambda event: controls.append(event),
+    )
+
+    async def failed_send(*_args, **_kwargs):
+        return SendResult(False, error="delivery failed")
+
+    adapter.send = failed_send
+    run(adapter._dispatch_message(InboundXmppMessage("failed-reply", BOT, ADMIN, "Admin", "/restart", False, None)))
+
+    assert controls == []
+    assert adapter.events == []
+
+
+def test_live_admin_snapshot_authorizes_next_dm_muc_and_invite_without_static_overwrite():
+    state = MemoryAdminState()
+    router = RecordingRouter(CommandResult(False))
+    adapter = make_adapter(admin_state=state, command_router=router)
+    client = FakeClient.instances[-1]
+    state.config = AdminConfig(frozenset({ADMIN}), frozenset({"live@example.com"}), None, None, None, False, 1)
+
+    async def scenario():
+        await adapter._dispatch_message(InboundXmppMessage("live-dm", BOT, "live@example.com", "Live", "question", False, None))
+        await adapter._dispatch_message(InboundXmppMessage("live-muc", "any@conference.example.com", "live@example.com", "Live", "Hermes: question", True, None))
+        await adapter._dispatch_message(InboundXmppMessage("anon", "any@conference.example.com", "not-a-jid", "Anon", "Hermes: denied", True, None))
+        await adapter._accept_invite(XmppInvite("new@conference.example.com", "live@example.com", True))
+
+    run(scenario())
+    assert [event.message_id for event in adapter.events] == ["live-dm", "live-muc"]
+    assert client.calls[-1] == ("join", "new@conference.example.com")
+    assert adapter.room_state.load() == frozenset({"new@conference.example.com"})
+
+
+def test_static_allowlist_seeds_new_admin_state_once_without_restoring_removed_member(monkeypatch):
+    persisted = {}
+
+    class SeedState(MemoryAdminState):
+        def __init__(self, path, first_owner):
+            self.path = path
+            super().__init__(frozenset({first_owner}))
+
+        def load(self):
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.touch(exist_ok=True)
+            self.config = persisted.setdefault(self.path, self.config)
+            return self.config
+
+        def mutate(self, transform):
+            self.config = transform(self.config)
+            persisted[self.path] = self.config
+            return self.config
+
+    monkeypatch.setattr(adapter_module, "AdminState", SeedState)
+    monkeypatch.setenv("XMPP_ALLOWED_USERS", "admin@example.com,legacy@example.com")
+    first = adapter_module.XmppPlatformAdapter(PlatformConfig(), client_factory=FakeClient)
+    first._snapshot()
+    assert first.admin_state.config.trusted_jids == frozenset({"legacy@example.com"})
+    first.admin_state.config = AdminConfig(frozenset({ADMIN}), frozenset(), None, None, None, False, 2)
+    persisted[first.admin_state.path] = first.admin_state.config
+    second = adapter_module.XmppPlatformAdapter(PlatformConfig(), client_factory=FakeClient)
+    assert second._snapshot().trusted_jids == frozenset()
 
 
 @pytest.mark.parametrize(

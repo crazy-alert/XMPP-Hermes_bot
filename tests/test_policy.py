@@ -14,6 +14,7 @@ from xmpp_bridge.policy import (
     route_direct,
     route_group,
     session_key,
+    snapshot_allowlist,
 )
 
 
@@ -56,6 +57,15 @@ def test_parse_allowlist_normalizes_entries_and_ignores_empty_items():
     assert parse_allowlist(" Admin@Example.Com/mobile, , alice@example.com ") == frozenset(
         {"admin@example.com", "alice@example.com"}
     )
+
+
+def test_snapshot_allowlist_uses_current_owners_and_trusted_or_fails_closed():
+    class Snapshot:
+        owners = frozenset({"Admin@Example.Com"})
+        trusted_jids = frozenset({"ALICE@example.com/mobile"})
+
+    assert snapshot_allowlist(Snapshot()) == frozenset({"admin@example.com", "alice@example.com"})
+    assert snapshot_allowlist(object()) == frozenset()
 
 
 def test_direct_route_accepts_allowed_sender_and_strips_body():

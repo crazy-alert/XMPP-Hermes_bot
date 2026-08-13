@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -12,8 +13,10 @@ from typing import Callable
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from xmpp_bridge.client import HermesXmppClient, XmppClientConfig
+from xmpp_bridge.admin_state import AdminState, AdminStateError, ConfigValidationError
+from xmpp_bridge.commands import CommandRouter
 from xmpp_bridge.models import InboundXmppMessage, XmppInvite
-from xmpp_bridge.policy import normalize_bare_jid, parse_allowlist, route_direct, route_group
+from xmpp_bridge.policy import normalize_bare_jid, parse_allowlist, route_direct, route_group, snapshot_allowlist
 from xmpp_bridge.state import RoomState
 
 logger = logging.getLogger(__name__)
@@ -99,11 +102,18 @@ class XmppPlatformAdapter(BasePlatformAdapter):
     splits_long_messages = True
 
     def __init__(self, config, *, client_factory=HermesXmppClient,
-                 monotonic: Callable[[], float] = time.monotonic, cache_capacity=_CAPACITY):
+                 monotonic: Callable[[], float] = time.monotonic, cache_capacity=_CAPACITY,
+                 admin_state=None, command_router=None, supervisor=None):
         super().__init__(config, Platform("xmpp"))
         jid, password, self.allowed_users, self.nick, host, port, state_path = _settings()
         self.bot_jid = normalize_bare_jid(jid)
         self.room_state = RoomState(state_path)
+        admin_path = Path(os.getenv("XMPP_ADMIN_STATE_PATH", "").strip() or state_path.with_name("admin.json"))
+        self._seed_admin_state = admin_state is None and not admin_path.exists()
+        first_owner = sorted(self.allowed_users)[0]
+        self.admin_state = admin_state or AdminState(admin_path, first_owner)
+        self.command_router = command_router or CommandRouter(self.admin_state)
+        self._supervisor = supervisor
         self._inbound = _TtlCache(600, cache_capacity, monotonic)
         self._outbound = _TtlCache(86400, cache_capacity, monotonic)
         client_config = XmppClientConfig(jid, password, self.nick, self.room_state, host, port, host is not None)
@@ -155,9 +165,34 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         key = (chat, message.message_id)
         if not message.message_id or self._inbound.contains(key):
             return
+        if not message.is_group:
+            try:
+                self._snapshot()
+            except (AdminStateError, ConfigValidationError, OSError, ValueError):
+                return
+            try:
+                command = self.command_router.handle(message)
+                handled = command.handled
+                reply = command.reply
+                control_event = command.control_event
+                if type(handled) is not bool or (handled and not isinstance(reply, str)):
+                    return
+            except Exception:
+                self._inbound.add(key)
+                return
+            if handled:
+                self._inbound.add(key)
+                delivered = bool(reply) and (await self.send(message.sender_jid, reply)).success
+                if delivered and control_event is not None:
+                    await self._emit_control(control_event)
+                return
+        try:
+            allowed_users = snapshot_allowlist(self._snapshot())
+        except (AdminStateError, ConfigValidationError, OSError, ValueError):
+            return
         room_nick = message.room_nick or self.nick
-        routed = (route_group(message, self.allowed_users, self.bot_jid, room_nick, self._outbound.ids_for(chat))
-                  if message.is_group else route_direct(message, self.allowed_users))
+        routed = (route_group(message, allowed_users, self.bot_jid, room_nick, self._outbound.ids_for(chat))
+                  if message.is_group else route_direct(message, allowed_users))
         if routed is None:
             return
         self._inbound.add(key)
@@ -176,13 +211,38 @@ class XmppPlatformAdapter(BasePlatformAdapter):
                              metadata={"xmpp_chat_jid": routing_chat, "xmpp_is_group": message.is_group})
         await self.handle_message(event)
 
+    def _snapshot(self):
+        snapshot = self.admin_state.load()
+        if self._seed_admin_state:
+            snapshot = self.admin_state.mutate(
+                lambda current: current.with_changes(
+                    trusted_jids=current.trusted_jids | (self.allowed_users - current.owners)
+                )
+            )
+            self._seed_admin_state = False
+        return snapshot
+
+    async def _emit_control(self, event) -> None:
+        if self._supervisor is None:
+            return
+        try:
+            result = self._supervisor(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.error("XMPP supervisor callback failed: %s", exc.__class__.__name__)
+
     async def _accept_invite(self, invite: XmppInvite):
         try:
             inviter = normalize_bare_jid(invite.inviter_jid)
             room = normalize_bare_jid(invite.room_jid)
         except ValueError:
             return
-        if inviter not in self.allowed_users:
+        try:
+            allowed_users = snapshot_allowlist(self._snapshot())
+        except (AdminStateError, ConfigValidationError, OSError, ValueError):
+            return
+        if inviter not in allowed_users:
             return
         self.room_state.add(room)
         try:

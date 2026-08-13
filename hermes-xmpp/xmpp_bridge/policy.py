@@ -22,6 +22,18 @@ class RoutedMessage:
     body: str
 
 
+def snapshot_allowlist(snapshot: object) -> frozenset[str]:
+    """Return the current owner/trusted authorization boundary fail-closed."""
+    try:
+        owners = snapshot.owners
+        trusted = snapshot.trusted_jids
+        if isinstance(owners, (str, bytes)) or isinstance(trusted, (str, bytes)):
+            return frozenset()
+        return frozenset(normalize_bare_jid(jid) for jid in owners | trusted)
+    except (AttributeError, TypeError, ValueError):
+        return frozenset()
+
+
 def normalize_bare_jid(value: str) -> str:
     """Return a normalized bare JID, rejecting malformed identities."""
     if not isinstance(value, str):
