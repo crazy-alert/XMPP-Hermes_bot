@@ -61,6 +61,7 @@ class HermesXmppClient(ClientXMPP):
         self._reconnect_task: asyncio.Task[None] | None = None
         self._intentional_disconnect = False
         self._sleep = asyncio.sleep
+        self._session_ready: asyncio.Future[None] | None = None
         super().__init__(config.bot_jid, config.password)
 
         # Slixmpp uses enable_starttls; retain the explicit policy name too.
@@ -79,33 +80,35 @@ class HermesXmppClient(ClientXMPP):
     async def connect_and_wait(self) -> None:
         self._intentional_disconnect = False
         ready = asyncio.get_running_loop().create_future()
+        self._session_ready = ready
 
-        def session_started(_event: object) -> None:
-            if not ready.done():
-                ready.set_result(None)
-
-        def connection_failed(error: object) -> None:
+        def terminal_failure(error: object) -> None:
             if not ready.done():
                 ready.set_exception(ConnectionError(str(error)))
 
-        error_events = ("connection_failed", "failed_auth", "ssl_invalid_chain")
-        self.add_event_handler("session_start", session_started)
+        def connection_attempt_done(attempt: asyncio.Future[object]) -> None:
+            if attempt.cancelled():
+                return
+            error = attempt.exception()
+            if error is not None and not ready.done():
+                ready.set_exception(ConnectionError(str(error)))
+
+        error_events = ("failed_auth", "ssl_invalid_chain")
         for event_name in error_events:
-            self.add_event_handler(event_name, connection_failed)
+            self.add_event_handler(event_name, terminal_failure)
         try:
             result = self.connect(self.config.host, self.config.port)
             if inspect.isawaitable(result):
-                asyncio.ensure_future(result).add_done_callback(
-                    lambda attempt: attempt.exception() if not attempt.cancelled() else None
-                )
+                asyncio.ensure_future(result).add_done_callback(connection_attempt_done)
             await ready
         except BaseException:
             self.cancel_connection_attempt()
             raise
         finally:
-            self.del_event_handler("session_start", session_started)
+            if self._session_ready is ready:
+                self._session_ready = None
             for event_name in error_events:
-                self.del_event_handler(event_name, connection_failed)
+                self.del_event_handler(event_name, terminal_failure)
 
     async def disconnect(self) -> None:  # type: ignore[override]
         self._intentional_disconnect = True
@@ -145,13 +148,21 @@ class HermesXmppClient(ClientXMPP):
         self.send(stanza)
 
     async def _session_start(self, _event: object) -> None:
-        self._reconnect_index = 0
-        self.send_presence()
-        roster = self.get_roster()
-        if inspect.isawaitable(roster):
-            await roster
-        for room in self.config.room_state.load():
-            await self.join_room(room)
+        try:
+            self._reconnect_index = 0
+            self.send_presence()
+            roster = self.get_roster()
+            if inspect.isawaitable(roster):
+                await roster
+            for room in self.config.room_state.load():
+                await self.join_room(room)
+        except BaseException as error:
+            if self._session_ready is not None and not self._session_ready.done():
+                self._session_ready.set_exception(error)
+            raise
+        else:
+            if self._session_ready is not None and not self._session_ready.done():
+                self._session_ready.set_result(None)
 
     def _handle_direct_message(self, stanza: object) -> None:
         if not self._is_message(stanza) or stanza["type"] == "groupchat":

@@ -238,20 +238,88 @@ def test_connect_and_wait_waits_for_session_start_not_tcp_future(tmp_path, caplo
     assert "not-a-real-password" not in caplog.text
 
 
-def test_connect_and_wait_installs_error_handler_before_connect(tmp_path):
+def test_connect_and_wait_remains_pending_until_session_initialization_finishes(tmp_path):
     async def scenario():
-        client = make_client(tmp_path)
+        state = RoomState(tmp_path / "rooms.json")
+        state.add(ROOM)
+        client = HermesXmppClient(
+            XmppClientConfig(BOT_JID, "not-a-real-password", "Hermes", state),
+            lambda event: None,
+            lambda event: None,
+        )
+        join_started = asyncio.Event()
+        release_join = asyncio.Event()
 
         def connect(host=None, port=None):
-            client.event("connection_failed", OSError("offline"))
             tcp_connected = asyncio.get_running_loop().create_future()
             tcp_connected.set_result(None)
             return tcp_connected
 
+        async def join_room(room_jid):
+            assert room_jid == ROOM
+            join_started.set()
+            await release_join.wait()
+
+        client.connect = connect
+        client.send_presence = lambda: None
+        client.get_roster = lambda: None
+        client.join_room = join_room
+
+        ready = asyncio.create_task(client.connect_and_wait())
+        await asyncio.sleep(0)
+        client.event("session_start")
+        await join_started.wait()
+
+        assert not ready.done()
+
+        release_join.set()
+        await ready
+        await client.stop()
+
+    asyncio.run(scenario())
+
+
+def test_per_candidate_connection_failure_does_not_abort_fallback_connect_loop(tmp_path):
+    async def scenario():
+        client = make_client(tmp_path)
+        connection_attempt = asyncio.get_running_loop().create_future()
+
+        def connect(host=None, port=None):
+            client._current_connection_attempt = connection_attempt
+            client.event("connection_failed", OSError("first address refused"))
+            return connection_attempt
+
+        client.connect = connect
+        client.send_presence = lambda: None
+        client.get_roster = lambda: None
+
+        ready = asyncio.create_task(client.connect_and_wait())
+        await asyncio.sleep(0)
+
+        assert not ready.done()
+        assert not connection_attempt.cancelled()
+
+        client.event("session_start")
+        await ready
+        connection_attempt.set_result(None)
+        await client.stop()
+
+    asyncio.run(scenario())
+
+
+def test_connect_and_wait_fails_when_connect_loop_exhausts(tmp_path):
+    async def scenario():
+        client = make_client(tmp_path)
+
+        def connect(host=None, port=None):
+            exhausted = asyncio.get_running_loop().create_future()
+            exhausted.set_exception(OSError("all connection candidates exhausted"))
+            return exhausted
+
         client.connect = connect
 
-        with pytest.raises(ConnectionError, match="offline"):
-            await client.connect_and_wait()
+        with pytest.raises(ConnectionError, match="all connection candidates exhausted"):
+            await asyncio.wait_for(client.connect_and_wait(), timeout=0.1)
 
         await client.stop()
 
