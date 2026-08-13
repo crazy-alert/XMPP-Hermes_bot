@@ -329,6 +329,19 @@ def test_failed_command_reply_never_emits_control_event():
     assert adapter.events == []
 
 
+def test_foreign_control_event_never_reaches_supervisor():
+    controls = []
+    adapter = make_adapter(
+        command_router=RecordingRouter(CommandResult(True, "reply", object())),
+        supervisor=lambda event: controls.append(event),
+    )
+
+    run(adapter._dispatch_message(InboundXmppMessage("foreign-control", BOT, ADMIN, "Admin", "/restart", False, None)))
+
+    assert FakeClient.instances[-1].calls == [("send_direct", ADMIN, "reply")]
+    assert controls == []
+
+
 def test_live_admin_snapshot_authorizes_next_dm_muc_and_invite_without_static_overwrite():
     state = MemoryAdminState()
     router = RecordingRouter(CommandResult(False))
@@ -376,6 +389,44 @@ def test_static_allowlist_seeds_new_admin_state_once_without_restoring_removed_m
     persisted[first.admin_state.path] = first.admin_state.config
     second = adapter_module.XmppPlatformAdapter(PlatformConfig(), client_factory=FakeClient)
     assert second._snapshot().trusted_jids == frozenset()
+
+
+def test_two_adapters_created_before_bootstrap_cannot_reseed_deleted_trusted_jid(monkeypatch):
+    persisted = {}
+
+    class RacingSeedState(MemoryAdminState):
+        def __init__(self, path, first_owner):
+            self.path = path
+            super().__init__(frozenset({first_owner}))
+
+        def load(self):
+            self.config = persisted.setdefault(self.path, self.config)
+            return self.config
+
+        def mutate(self, transform):
+            current = persisted.setdefault(self.path, self.config)
+            proposed = transform(current)
+            self.config = AdminConfig(
+                proposed.owners,
+                proposed.trusted_jids,
+                proposed.model,
+                proposed.endpoint,
+                proposed.token_mask,
+                proposed.token_present,
+                current.revision + 1,
+            )
+            persisted[self.path] = self.config
+            return self.config
+
+    monkeypatch.setattr(adapter_module, "AdminState", RacingSeedState)
+    monkeypatch.setenv("XMPP_ALLOWED_USERS", "admin@example.com,legacy@example.com")
+    first = adapter_module.XmppPlatformAdapter(PlatformConfig(), client_factory=FakeClient)
+    delayed = adapter_module.XmppPlatformAdapter(PlatformConfig(), client_factory=FakeClient)
+
+    assert first._snapshot().trusted_jids == frozenset({"legacy@example.com"})
+    first.admin_state.mutate(lambda current: current.with_changes(trusted_jids=frozenset()))
+
+    assert delayed._snapshot().trusted_jids == frozenset()
 
 
 @pytest.mark.parametrize(

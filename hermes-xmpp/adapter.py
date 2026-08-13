@@ -14,13 +14,17 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from xmpp_bridge.client import HermesXmppClient, XmppClientConfig
 from xmpp_bridge.admin_state import AdminState, AdminStateError, ConfigValidationError
-from xmpp_bridge.commands import CommandRouter
+from xmpp_bridge.commands import CommandRouter, RestartGateway
 from xmpp_bridge.models import InboundXmppMessage, XmppInvite
 from xmpp_bridge.policy import normalize_bare_jid, parse_allowlist, route_direct, route_group, snapshot_allowlist
 from xmpp_bridge.state import RoomState
 
 logger = logging.getLogger(__name__)
 _CAPACITY = 4096
+
+
+class _BootstrapAlreadyChanged(Exception):
+    """The admin state has already advanced beyond its initial revision."""
 
 
 class _TtlCache:
@@ -214,16 +218,22 @@ class XmppPlatformAdapter(BasePlatformAdapter):
     def _snapshot(self):
         snapshot = self.admin_state.load()
         if self._seed_admin_state:
-            snapshot = self.admin_state.mutate(
-                lambda current: current.with_changes(
-                    trusted_jids=current.trusted_jids | (self.allowed_users - current.owners)
+            def seed_initial(current):
+                if current.revision != 0:
+                    raise _BootstrapAlreadyChanged
+                return current.with_changes(
+                    trusted_jids=current.trusted_jids | (self.allowed_users - current.owners),
                 )
-            )
+
+            try:
+                snapshot = self.admin_state.mutate(seed_initial)
+            except _BootstrapAlreadyChanged:
+                snapshot = self.admin_state.load()
             self._seed_admin_state = False
         return snapshot
 
     async def _emit_control(self, event) -> None:
-        if self._supervisor is None:
+        if self._supervisor is None or not isinstance(event, RestartGateway):
             return
         try:
             result = self._supervisor(event)
