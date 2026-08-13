@@ -37,6 +37,9 @@ HERMES_AGENT_DISK=$(path_at "$HERMES_AGENT_DIR")
 HERMES_BIN=$HERMES_AGENT_DIR/venv/bin/hermes
 HERMES_PYTHON=$HERMES_AGENT_DIR/venv/bin/python
 UV_BIN=$HERMES_HOME/bin/uv
+HERMES_VENV_DISK=$(path_at "$HERMES_AGENT_DIR/venv")
+HERMES_VENV_BIN_DISK=$(path_at "$HERMES_AGENT_DIR/venv/bin")
+HERMES_BIN_PARENT_DISK=$(path_at "$HERMES_HOME/bin")
 HERMES_BIN_DISK=$(path_at "$HERMES_BIN")
 HERMES_PYTHON_DISK=$(path_at "$HERMES_PYTHON")
 UV_BIN_DISK=$(path_at "$UV_BIN")
@@ -88,8 +91,20 @@ reject_unsafe_existing_dir() {
         fi
     fi
 }
-for directory in "$HERMES_LOCAL_DISK" "$HERMES_HOME_DISK" "$PLUGIN_PARENT"; do
+reject_unsafe_existing_file() {
+    file=$1
+    if [ -e "$file" ] || [ -L "$file" ]; then
+        if [ ! -f "$file" ] || [ -L "$file" ]; then
+            printf 'Ошибка: исполняемый путь Hermes должен быть обычным файлом, а не ссылкой или каталогом: %s\n' "$file" >&2
+            exit 1
+        fi
+    fi
+}
+for directory in "$HERMES_LOCAL_DISK" "$HERMES_HOME_DISK" "$PLUGIN_PARENT" "$HERMES_AGENT_DISK" "$HERMES_VENV_DISK" "$HERMES_VENV_BIN_DISK" "$HERMES_BIN_PARENT_DISK"; do
     reject_unsafe_existing_dir "$directory"
+done
+for file in "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK"; do
+    reject_unsafe_existing_file "$file"
 done
 
 export DEBIAN_FRONTEND=noninteractive
@@ -158,9 +173,9 @@ validate_runtime() {
     done
     case "$HERMES_BIN_DISK:$HERMES_PYTHON_DISK:$UV_BIN_DISK" in /var/lib/hermes/*) : ;; *) return 1 ;; esac
     [ -z "$(find /var/lib/hermes -xdev ! -user hermes -print -quit)" ] || return 1
-    "$HERMES_PYTHON_DISK" -c 'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'
-    "$HERMES_BIN_DISK" --version >/dev/null
-    "$UV_BIN_DISK" --version >/dev/null
+    runuser -u hermes -- "$HERMES_PYTHON_DISK" -c 'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'
+    runuser -u hermes -- "$HERMES_BIN_DISK" --version >/dev/null
+    runuser -u hermes -- "$UV_BIN_DISK" --version >/dev/null
 }
 
 # Runtime installation is separate and idempotent. Docker access is granted only after validation.

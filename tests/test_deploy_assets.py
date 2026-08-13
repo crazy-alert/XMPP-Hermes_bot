@@ -201,8 +201,8 @@ def test_env_template_and_unit_contract() -> None:
             values[key] = value
     assert values == {
         "HERMES_HOME": "/var/lib/hermes/.hermes",
-        "XMPP_JID": "hermes@aversa.run/Hermes",
-        "XMPP_ALLOWED_USERS": "admin@aversa.run,yuklya@aversa.run,julia@aversa.run",
+        "XMPP_JID": "bot@example.com/Hermes",
+        "XMPP_ALLOWED_USERS": "admin@example.com",
         "XMPP_NICK": "Hermes",
         "XMPP_STATE_PATH": "/var/lib/hermes/.hermes/xmpp/rooms.json",
     }
@@ -434,6 +434,81 @@ def test_unsafe_existing_plugins_path_fails_before_mutation(tmp_path: Path, unsa
     assert not (fake_root / "etc/hermes/hermes.env").exists()
     assert not (fake_root / "etc/systemd/system/hermes-gateway.service").exists()
     assert not (plugins / "xmpp-platform").exists()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "hermes-agent",
+        "hermes-agent/venv",
+        "hermes-agent/venv/bin",
+        "bin",
+    ],
+)
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "dangling_symlink", "file"])
+def test_unsafe_runtime_directory_fails_before_apt(tmp_path: Path, relative: str, unsafe_kind: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    hermes_home = fake_root / "var/lib/hermes/.hermes"
+    target = hermes_home / relative
+    target.parent.mkdir(parents=True)
+    external = tmp_path / "external-runtime"
+    external.mkdir()
+    marker = external / "marker"
+    marker.write_text("unchanged")
+    before_mode = stat.S_IMODE(external.stat().st_mode)
+    try:
+        if unsafe_kind == "symlink":
+            target.symlink_to(external, target_is_directory=True)
+        elif unsafe_kind == "dangling_symlink":
+            target.symlink_to(tmp_path / "missing-runtime", target_is_directory=True)
+        else:
+            target.write_text("not a directory")
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    generated = generated_installer(tmp_path, fake_root)
+    result = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
+
+    assert result.returncode != 0
+    assert marker.read_text() == "unchanged"
+    assert stat.S_IMODE(external.stat().st_mode) == before_mode
+    log_path = tmp_path / "commands.log"
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
+    assert not log_path.exists() or "curl" not in log_path.read_text()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "hermes-agent/venv/bin/hermes",
+        "hermes-agent/venv/bin/python",
+        "bin/uv",
+    ],
+)
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
+def test_unsafe_runtime_executable_never_runs_as_root(tmp_path: Path, relative: str, unsafe_kind: str) -> None:
+    fake_root, env = build_harness(tmp_path)
+    target = fake_root / "var/lib/hermes/.hermes" / relative
+    target.parent.mkdir(parents=True)
+    executed = tmp_path / "executed"
+    attacker = tmp_path / "attacker"
+    write_executable(attacker, f"touch {bash_path(executed)!r}\n")
+    try:
+        if unsafe_kind == "symlink":
+            target.symlink_to(attacker)
+        else:
+            target.mkdir()
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    generated = generated_installer(tmp_path, fake_root)
+    result = subprocess.run([find_bash(), str(generated)], cwd=ROOT, env=env, text=True, capture_output=True)
+
+    assert result.returncode != 0
+    assert not executed.exists()
+    log_path = tmp_path / "commands.log"
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
+    assert not log_path.exists() or "curl" not in log_path.read_text()
 
 
 def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path) -> None:
