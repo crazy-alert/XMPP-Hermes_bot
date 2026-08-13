@@ -242,6 +242,8 @@ def generated_bootstrap(
     *,
     docker_missing: bool = False,
     fail_state_commit: bool = False,
+    fail_env_backup: bool = False,
+    recover_only: bool = False,
     pause_lock: bool = False,
 ) -> tuple[Path, Path, dict[str, str]]:
     """Generated bootstrap harness; production installer contains no test hooks."""
@@ -289,6 +291,14 @@ flock() { :; }
         target = 'runuser -u hermes -- mv -f "$STATE_TMP" "$STATE_FILE"'
         assert target in source
         source = source.replace(target, 'false # generated commit failure', 1)
+    if fail_env_backup:
+        target = '    cp -p -- "$ENV_FILE" "$TXN_DIR/env.old"'
+        assert target in source
+        source = source.replace(target, '    false # generated backup failure', 1)
+    if recover_only:
+        target = 'mkdir -- "$TXN_DIR"'
+        assert target in source
+        source = source.replace(target, 'exit 0 # generated recovery-only run\n' + target, 1)
     script = tmp_path / "bootstrap-under-test.sh"
     script.write_text(source, encoding="utf-8", newline="\n")
     env = os.environ.copy()
@@ -447,6 +457,98 @@ def test_bootstrap_restores_both_previous_files_when_state_commit_fails(tmp_path
     assert env_file.read_text(encoding="utf-8") == "old-env\n"
     assert state_file.read_text(encoding="utf-8") == '{"version":1,"owners":["old@example.com"]}\n'
     assert not (root / "etc/hermes/.xmpp-config-transaction").exists()
+
+
+def test_bootstrap_backup_failure_preserves_the_live_previous_generation(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path, fail_env_backup=True)
+    env_file = root / "etc/hermes/hermes.env"
+    state_file = root / "var/lib/hermes/.hermes/xmpp/admin.json"
+    env_file.write_text("old-env\n", encoding="utf-8")
+    state_file.write_text('{"version":1,"owners":["old@example.com"]}\n', encoding="utf-8")
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input=bootstrap_input(), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode != 0
+    assert env_file.read_text(encoding="utf-8") == "old-env\n"
+    assert state_file.read_text(encoding="utf-8") == '{"version":1,"owners":["old@example.com"]}\n'
+
+
+def test_bootstrap_recovery_preserves_a_durably_committed_new_generation(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path, recover_only=True)
+    env_file = root / "etc/hermes/hermes.env"
+    state_dir = root / "var/lib/hermes/.hermes/xmpp"
+    state_file = state_dir / "admin.json"
+    transaction = root / "etc/hermes/.xmpp-config-transaction"
+    transaction.mkdir()
+    env_file.write_text("new-env\n", encoding="utf-8")
+    state_file.write_text('{"version":1,"owners":["new@example.com"]}\n', encoding="utf-8")
+    (transaction / "env.present").touch()
+    (transaction / "env.old").write_text("old-env\n", encoding="utf-8")
+    (transaction / "state.present").touch()
+    (transaction / "state.old").write_text(
+        '{"version":1,"owners":["old@example.com"]}\n', encoding="utf-8"
+    )
+    (transaction / ".commit").touch()
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input=bootstrap_input(), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert env_file.read_text(encoding="utf-8") == "new-env\n"
+    assert state_file.read_text(encoding="utf-8") == '{"version":1,"owners":["new@example.com"]}\n'
+    assert not transaction.exists()
+    assert not (transaction / "state.old").exists()
+
+
+def test_bootstrap_recovery_restores_a_complete_old_generation_after_interruption(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path, recover_only=True)
+    env_file = root / "etc/hermes/hermes.env"
+    state_dir = root / "var/lib/hermes/.hermes/xmpp"
+    state_file = state_dir / "admin.json"
+    transaction = root / "etc/hermes/.xmpp-config-transaction"
+    transaction.mkdir()
+    env_file.write_text("new-env\n", encoding="utf-8")
+    state_file.write_text('{"version":1,"owners":["old@example.com"]}\n', encoding="utf-8")
+    (transaction / "env.present").touch()
+    (transaction / "env.old").write_text("old-env\n", encoding="utf-8")
+    (transaction / "state.present").touch()
+    (transaction / "state.old").write_text(
+        '{"version":1,"owners":["old@example.com"]}\n', encoding="utf-8"
+    )
+    (transaction / "backups.ready").touch()
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input=bootstrap_input(), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert env_file.read_text(encoding="utf-8") == "old-env\n"
+    assert state_file.read_text(encoding="utf-8") == '{"version":1,"owners":["old@example.com"]}\n'
+    assert not transaction.exists()
+
+
+def test_bootstrap_success_removes_all_transaction_backups(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path)
+    env_file = root / "etc/hermes/hermes.env"
+    state_dir = root / "var/lib/hermes/.hermes/xmpp"
+    state_file = state_dir / "admin.json"
+    env_file.write_text("old-env\n", encoding="utf-8")
+    state_file.write_text('{"version":1,"owners":["old@example.com"]}\n', encoding="utf-8")
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input=bootstrap_input(), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (root / "etc/hermes/.xmpp-config-transaction").exists()
+    assert not any(state_dir.glob(".admin.json.*"))
 
 
 def test_bootstrap_serializes_the_env_and_admin_state_generation_under_one_lock() -> None:

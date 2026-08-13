@@ -139,7 +139,6 @@ ENV_DIR=/etc/hermes
 ENV_FILE=$ENV_DIR/hermes.env
 STATE_DIR=/var/lib/hermes/.hermes/xmpp
 STATE_FILE=$STATE_DIR/admin.json
-STATE_BACKUP=$STATE_DIR/.admin.json.installer-backup
 [ -d "$ENV_DIR" ] && [ ! -L "$ENV_DIR" ] || fail 'unsafe environment directory'
 [ ! -e "$ENV_FILE" ] || { [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ]; } || fail 'unsafe environment file'
 runuser -u hermes -- mkdir -p -- "$STATE_DIR"
@@ -149,34 +148,82 @@ exec 9>"$ENV_DIR/.xmpp-config.lock"
 flock -x 9
 chmod 0600 "$ENV_DIR/.xmpp-config.lock"
 TXN_DIR=$ENV_DIR/.xmpp-config-transaction
-if [ -d "$TXN_DIR" ]; then
-    [ ! -L "$TXN_DIR" ] || fail 'unsafe configuration transaction marker'
+
+sync_dir() {
+    sync -f "$1"
+}
+
+restore_previous_generation() {
+    local env_restore_tmp state_restore_tmp
     if [ -e "$TXN_DIR/env.present" ]; then
-        mv -f -- "$TXN_DIR/env.old" "$ENV_FILE"
+        env_restore_tmp=$(mktemp "$ENV_DIR/.hermes.env.restore.XXXXXX")
+        cp -p -- "$TXN_DIR/env.old" "$env_restore_tmp"
+        chmod 0600 "$env_restore_tmp"
+        chown root:root "$env_restore_tmp"
+        sync -f "$env_restore_tmp"
+        mv -f -- "$env_restore_tmp" "$ENV_FILE"
+        sync -f "$ENV_FILE"
     else
         rm -f -- "$ENV_FILE"
     fi
+    sync_dir "$ENV_DIR"
     if [ -e "$TXN_DIR/state.present" ]; then
-        runuser -u hermes -- mv -f -- "$STATE_BACKUP" "$STATE_FILE"
+        state_restore_tmp=$(mktemp "$STATE_DIR/.admin.json.restore.XXXXXX")
+        cp -p -- "$TXN_DIR/state.old" "$state_restore_tmp"
+        chown hermes:hermes "$state_restore_tmp"
+        chmod 0600 "$state_restore_tmp"
+        sync -f "$state_restore_tmp"
+        runuser -u hermes -- mv -f -- "$state_restore_tmp" "$STATE_FILE"
+        sync -f "$STATE_FILE"
     else
         runuser -u hermes -- rm -f -- "$STATE_FILE"
     fi
+    sync_dir "$STATE_DIR"
+}
+
+clear_transaction() {
     rm -rf -- "$TXN_DIR"
+    sync_dir "$ENV_DIR"
+}
+
+if [ -d "$TXN_DIR" ]; then
+    [ ! -L "$TXN_DIR" ] || fail 'unsafe configuration transaction marker'
+    if [ -e "$TXN_DIR/.commit" ]; then
+        clear_transaction
+    elif [ -e "$TXN_DIR/backups.ready" ]; then
+        restore_previous_generation
+        clear_transaction
+    else
+        clear_transaction
+    fi
 fi
 mkdir -- "$TXN_DIR"
 chmod 0700 "$TXN_DIR"
+sync_dir "$ENV_DIR"
 transaction_cleanup() {
-    if [ "${TXN_COMMITTED:-0}" != 1 ]; then
-        if [ -e "$TXN_DIR/env.present" ]; then mv -f -- "$TXN_DIR/env.old" "$ENV_FILE"; else rm -f -- "$ENV_FILE"; fi
-        if [ -e "$TXN_DIR/state.present" ]; then runuser -u hermes -- mv -f -- "$STATE_BACKUP" "$STATE_FILE"; else runuser -u hermes -- rm -f -- "$STATE_FILE"; fi
+    if [ "${TXN_COMMITTED:-0}" != 1 ] && [ -e "$TXN_DIR/backups.ready" ]; then
+        restore_previous_generation
     fi
-    rm -rf -- "$TXN_DIR"
+    clear_transaction
     cleanup
 }
+trap 'exit 1' HUP INT TERM
 trap transaction_cleanup EXIT
-if [ -f "$ENV_FILE" ]; then cp -p -- "$ENV_FILE" "$TXN_DIR/env.old"; touch "$TXN_DIR/env.present"; fi
-if [ -f "$STATE_FILE" ]; then runuser -u hermes -- cp -p -- "$STATE_FILE" "$STATE_BACKUP"; touch "$TXN_DIR/state.present"; fi
-sync -f "$TXN_DIR"
+if [ -f "$ENV_FILE" ]; then
+    cp -p -- "$ENV_FILE" "$TXN_DIR/env.old"
+    sync -f "$TXN_DIR/env.old"
+    touch "$TXN_DIR/env.present"
+    sync -f "$TXN_DIR/env.present"
+fi
+if [ -f "$STATE_FILE" ]; then
+    cp -p -- "$STATE_FILE" "$TXN_DIR/state.old"
+    sync -f "$TXN_DIR/state.old"
+    touch "$TXN_DIR/state.present"
+    sync -f "$TXN_DIR/state.present"
+fi
+touch "$TXN_DIR/backups.ready"
+sync -f "$TXN_DIR/backups.ready"
+sync_dir "$TXN_DIR"
 ENV_TMP=$(mktemp "$TXN_DIR/hermes.env.XXXXXX")
 STATE_TMP=$(runuser -u hermes -- mktemp "$STATE_DIR/.admin.json.XXXXXX")
 chmod 0600 "$ENV_TMP"
@@ -185,11 +232,17 @@ printf 'HERMES_HOME=/var/lib/hermes/.hermes\nXMPP_JID=%s\nXMPP_ALLOWED_USERS=%s\
 runuser -u hermes -- sh -c 'umask 077; printf "{\\\"version\\\":1,\\\"revision\\\":0,\\\"owners\\\":[\\\"%s\\\"],\\\"trusted_jids\\\":[],\\\"model\\\":null,\\\"endpoint\\\":null,\\\"token\\\":null}\\n" "$2" >"$1"; sync -f "$1"' sh "$STATE_TMP" "$OWNER"
 sync -f "$ENV_TMP"
 mv -f "$ENV_TMP" "$ENV_FILE"
+sync_dir "$ENV_DIR"
 runuser -u hermes -- mv -f "$STATE_TMP" "$STATE_FILE"
+sync_dir "$STATE_DIR"
 chmod 0600 "$ENV_FILE"
 chown root:root "$ENV_FILE"
+sync -f "$ENV_FILE"
+sync_dir "$ENV_DIR"
 PASSWORD=''
 touch "$TXN_DIR/.commit"
+sync -f "$TXN_DIR/.commit"
+sync_dir "$TXN_DIR"
 TXN_COMMITTED=1
 
 printf '%s' 'Start Hermes service now? [y/N] ' >&2
