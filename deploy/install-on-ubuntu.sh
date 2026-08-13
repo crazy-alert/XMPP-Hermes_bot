@@ -1,37 +1,73 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [ "$(id -u)" -ne 0 ]; then
+TEST_MODE=${HERMES_INSTALL_TEST_MODE:-0}
+ROOT_PREFIX=""
+if [ "$TEST_MODE" = 1 ]; then
+    ROOT_PREFIX=${HERMES_INSTALL_TEST_ROOT:?HERMES_INSTALL_TEST_ROOT is required in test mode}
+    TEST_BIN=${HERMES_INSTALL_TEST_BIN:?HERMES_INSTALL_TEST_BIN is required in test mode}
+    case "$ROOT_PREFIX:$TEST_BIN" in
+        /:*|*:*:) printf '%s\n' 'Unsafe installer test configuration.' >&2; exit 2 ;;
+    esac
+    PATH="$TEST_BIN:/usr/bin:/bin"
+    export PATH
+    for command_name in apt-get groupadd useradd usermod getent runuser curl chown systemctl systemd-analyze; do
+        command_path=$(command -v "$command_name" || true)
+        case "$command_path" in "$TEST_BIN"/*) : ;; *) printf 'Unsafe test command: %s\n' "$command_name" >&2; exit 2 ;; esac
+    done
+elif [ "$(id -u)" -ne 0 ]; then
     printf '%s\n' 'Ошибка: запустите установщик от root.' >&2
     exit 1
 fi
 
-if [ ! -r /etc/os-release ]; then
+path_at() {
+    printf '%s%s\n' "$ROOT_PREFIX" "$1"
+}
+
+OS_RELEASE=$(path_at /etc/os-release)
+if [ ! -r "$OS_RELEASE" ]; then
     printf '%s\n' 'Ошибка: не найден /etc/os-release.' >&2
     exit 1
 fi
-
-# shellcheck disable=SC1091
-. /etc/os-release
-if [ "${ID:-}" != "ubuntu" ] || ! dpkg --compare-versions "${VERSION_ID:-0}" ge "24.04"; then
+# shellcheck disable=SC1090
+. "$OS_RELEASE"
+if [ "${ID:-}" != ubuntu ]; then
+    printf '%s\n' 'Ошибка: требуется Ubuntu 24.04 или новее.' >&2
+    exit 1
+fi
+if [ "$TEST_MODE" != 1 ] && ! dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04; then
     printf '%s\n' 'Ошибка: требуется Ubuntu 24.04 или новее.' >&2
     exit 1
 fi
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-REPO_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
-PLUGIN_SOURCE="$REPO_DIR/hermes-xmpp"
-PLUGIN_DEST=/var/lib/hermes/.hermes/plugins/xmpp-platform
-ENV_FILE=/etc/hermes/hermes.env
-UNIT_FILE=/etc/systemd/system/hermes-gateway.service
-OFFICIAL_INSTALLER_URL=https://hermes-agent.nousresearch.com/install.sh
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
+PLUGIN_SOURCE=$REPO_DIR/hermes-xmpp
+HERMES_HOME=/var/lib/hermes/.hermes
+HERMES_AGENT_DIR=$HERMES_HOME/hermes-agent
+HERMES_HOME_DISK=$(path_at "$HERMES_HOME")
+HERMES_AGENT_DISK=$(path_at "$HERMES_AGENT_DIR")
+HERMES_BIN=$HERMES_AGENT_DIR/venv/bin/hermes
+HERMES_PYTHON=$HERMES_AGENT_DIR/venv/bin/python
+UV_BIN=/var/lib/hermes/.local/bin/uv
+HERMES_BIN_DISK=$(path_at "$HERMES_BIN")
+HERMES_PYTHON_DISK=$(path_at "$HERMES_PYTHON")
+UV_BIN_DISK=$(path_at "$UV_BIN")
+PLUGIN_DEST=$(path_at /var/lib/hermes/.hermes/plugins/xmpp-platform)
+ENV_FILE=$(path_at /etc/hermes/hermes.env)
+UNIT_FILE=$(path_at /etc/systemd/system/hermes-gateway.service)
 
-if [ ! -f "$PLUGIN_SOURCE/plugin.yaml" ]; then
-    printf 'Ошибка: плагин не найден: %s\n' "$PLUGIN_SOURCE" >&2
+HERMES_RELEASE=v2026.8.3
+HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb
+INSTALLER_SHA256=ed34c600de6e952234b278d7c8b8d05ec4790c0e1dec2ea2a86e5b3bfaa5b0a1
+OFFICIAL_INSTALLER_URL=https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_COMMIT/scripts/install.sh
+
+if [ ! -f "$PLUGIN_SOURCE/adapter.py" ] || [ ! -f "$PLUGIN_SOURCE/plugin.yaml" ] || [ ! -d "$PLUGIN_SOURCE/xmpp_bridge" ]; then
+    printf 'Ошибка: неполный источник плагина: %s\n' "$PLUGIN_SOURCE" >&2
     exit 1
 fi
-if find "$PLUGIN_SOURCE" -type l -print -quit | grep -q .; then
-    printf '%s\n' 'Ошибка: дерево плагина не должно содержать символические ссылки.' >&2
+if find "$PLUGIN_SOURCE" \( -type l -o \( ! -type d ! -type f \) \) -print -quit | grep -q .; then
+    printf '%s\n' 'Ошибка: источник плагина содержит ссылку или нерегулярный файл.' >&2
     exit 1
 fi
 if ! getent group docker >/dev/null; then
@@ -39,91 +75,137 @@ if ! getent group docker >/dev/null; then
     exit 1
 fi
 
+# Existing identities are validated before apt or any other host mutation.
+if getent group hermes >/dev/null; then
+    if ! getent passwd hermes >/dev/null || [ "$(id -gn hermes)" != hermes ]; then
+        printf '%s\n' 'Ошибка: существующая группа hermes конфликтует с учётной записью.' >&2
+        exit 1
+    fi
+fi
+if getent passwd hermes >/dev/null; then
+    HERMES_ACCOUNT_HOME=$(getent passwd hermes | cut -d: -f6)
+    if [ "$HERMES_ACCOUNT_HOME" != /var/lib/hermes ] || [ "$(id -gn hermes)" != hermes ]; then
+        printf '%s\n' 'Ошибка: ожидаются hermes:hermes и home /var/lib/hermes.' >&2
+        exit 1
+    fi
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends \
-    ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev
+apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev
 
-if ! getent group hermes >/dev/null; then
-    groupadd --system hermes
-fi
+if ! getent group hermes >/dev/null; then groupadd --system hermes; fi
 if ! getent passwd hermes >/dev/null; then
-    useradd --system --create-home --home-dir /var/lib/hermes \
-        --gid hermes --shell /usr/sbin/nologin hermes
+    useradd --system --create-home --home-dir /var/lib/hermes --gid hermes --shell /usr/sbin/nologin hermes
 fi
-HERMES_HOME_DIR="$(getent passwd hermes | cut -d: -f6)"
-HERMES_PRIMARY_GROUP="$(id -gn hermes)"
-if [ "$HERMES_HOME_DIR" != "/var/lib/hermes" ] || [ "$HERMES_PRIMARY_GROUP" != "hermes" ]; then
-    printf 'Ошибка: ожидаются hermes:hermes и home /var/lib/hermes; получены %s:%s\n' \
-        hermes "$HERMES_PRIMARY_GROUP" >&2
-    exit 1
+
+secure_dir() {
+    if [ "$TEST_MODE" = 1 ]; then mkdir -p -- "$1"; chmod "$4" "$1"; else install -d -o "$2" -g "$3" -m "$4" "$1"; fi
+}
+secure_dir "$(path_at /var/lib/hermes)" hermes hermes 0700
+secure_dir "$(path_at /var/lib/hermes/.local/bin)" hermes hermes 0700
+secure_dir "$HERMES_HOME_DISK" hermes hermes 0700
+secure_dir "$(dirname -- "$PLUGIN_DEST")" hermes hermes 0700
+secure_dir "$(dirname -- "$ENV_FILE")" root root 0750
+secure_dir "$(dirname -- "$UNIT_FILE")" root root 0755
+
+INSTALLER_TMP=$(mktemp "$(path_at /var/lib/hermes)/.hermes-installer.XXXXXX")
+PLUGIN_STAGE=$(mktemp -d "$(dirname -- "$PLUGIN_DEST")/.xmpp-platform.stage.XXXXXX")
+UNIT_STAGE=$(mktemp "$(dirname -- "$UNIT_FILE")/.hermes-gateway.stage.XXXXXX")
+PLUGIN_BACKUP=$PLUGIN_DEST.backup.$$
+UNIT_BACKUP=$UNIT_FILE.backup.$$
+PLUGIN_SWAPPED=0
+UNIT_SWAPPED=0
+TRANSACTION=0
+WAS_ACTIVE=0
+WAS_ENABLED=0
+
+rollback() {
+    status=$?
+    trap - EXIT
+    if [ "$TRANSACTION" = 1 ] && [ "$status" -ne 0 ]; then
+        if [ "$UNIT_SWAPPED" = 1 ]; then rm -f -- "$UNIT_FILE"; [ ! -e "$UNIT_BACKUP" ] || mv -- "$UNIT_BACKUP" "$UNIT_FILE"; fi
+        if [ "$PLUGIN_SWAPPED" = 1 ]; then rm -rf -- "$PLUGIN_DEST"; [ ! -e "$PLUGIN_BACKUP" ] || mv -- "$PLUGIN_BACKUP" "$PLUGIN_DEST"; fi
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        [ "$WAS_ENABLED" = 0 ] || systemctl enable hermes-gateway >/dev/null 2>&1 || true
+        [ "$WAS_ACTIVE" = 0 ] || systemctl start hermes-gateway >/dev/null 2>&1 || true
+    fi
+    rm -rf -- "$INSTALLER_TMP" "$PLUGIN_STAGE" "$UNIT_STAGE"
+    exit "$status"
+}
+trap rollback EXIT
+
+validate_runtime() {
+    for executable in "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK"; do
+        [ -f "$executable" ] && [ ! -L "$executable" ] && [ -x "$executable" ] || return 1
+    done
+    case "$HERMES_BIN_DISK:$HERMES_PYTHON_DISK:$UV_BIN_DISK" in "$ROOT_PREFIX"/var/lib/hermes/*) : ;; *) return 1 ;; esac
+    if [ "$TEST_MODE" != 1 ]; then
+        [ -z "$(find "$(path_at /var/lib/hermes)" -xdev ! -user hermes -print -quit)" ] || return 1
+    fi
+    "$HERMES_PYTHON_DISK" -c 'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'
+    "$HERMES_BIN_DISK" --version >/dev/null
+    "$UV_BIN_DISK" --version >/dev/null
+}
+
+# Runtime installation is separate and idempotent. Docker access is granted only after validation.
+if ! validate_runtime; then
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$OFFICIAL_INSTALLER_URL" --output "$INSTALLER_TMP"
+    if [ "$TEST_MODE" != 1 ]; then
+        printf '%s  %s\n' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status
+        chown hermes:hermes "$INSTALLER_TMP"
+    fi
+    chmod 0700 "$INSTALLER_TMP"
+    runuser -u hermes -- env HOME="$(path_at /var/lib/hermes)" HERMES_HOME="$HERMES_HOME_DISK" \
+        bash "$INSTALLER_TMP" --skip-setup --skip-browser --dir "$HERMES_AGENT_DISK" \
+        --hermes-home "$HERMES_HOME_DISK" --commit "$HERMES_COMMIT"
+    validate_runtime || { printf '%s\n' 'Ошибка: установленная среда Hermes не прошла проверку.' >&2; exit 1; }
 fi
-install -d -o hermes -g hermes -m 0700 /var/lib/hermes
+runuser -u hermes -- "$UV_BIN_DISK" pip install --python "$HERMES_PYTHON_DISK" 'slixmpp>=1.12,<2' pytest
+
+# Stage the complete allowlisted plugin before stopping the service.
+cp -- "$PLUGIN_SOURCE/adapter.py" "$PLUGIN_SOURCE/plugin.yaml" "$PLUGIN_STAGE/"
+mkdir -p -- "$PLUGIN_STAGE/xmpp_bridge"
+while IFS= read -r source_file; do cp -- "$source_file" "$PLUGIN_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
+[ -f "$PLUGIN_STAGE/xmpp_bridge/__init__.py" ] || { printf '%s\n' 'Ошибка: отсутствует xmpp_bridge/__init__.py.' >&2; exit 1; }
+if [ "$TEST_MODE" != 1 ]; then chown -R hermes:hermes "$PLUGIN_STAGE"; fi
+chmod -R go-rwx "$PLUGIN_STAGE"
+
+sed "s|^ExecStart=.*|ExecStart=$HERMES_BIN gateway run|" "$SCRIPT_DIR/hermes-gateway.service" >"$UNIT_STAGE"
+chmod 0644 "$UNIT_STAGE"
+systemd-analyze verify "$UNIT_STAGE"
+
+# Preserve env content, reject unsafe file types, and enforce manager-only secrets.
+if [ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; then
+    [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] || { printf '%s\n' 'Ошибка: hermes.env должен быть регулярным файлом.' >&2; exit 1; }
+else
+    cp -- "$SCRIPT_DIR/hermes.env.example" "$ENV_FILE"
+fi
+chown root:root "$ENV_FILE"
+chmod 0600 "$ENV_FILE"
+
 usermod -aG docker hermes
 
-INSTALLER_TMP="$(mktemp /tmp/hermes-agent-install.XXXXXX)"
-UNIT_TMP="$(mktemp /tmp/hermes-gateway.XXXXXX.service)"
-cleanup() {
-    rm -f -- "$INSTALLER_TMP" "$UNIT_TMP"
-}
-trap cleanup EXIT
+systemctl is-active --quiet hermes-gateway && WAS_ACTIVE=1 || true
+systemctl is-enabled --quiet hermes-gateway && WAS_ENABLED=1 || true
+TRANSACTION=1
+if [ "$WAS_ACTIVE" = 1 ]; then systemctl stop hermes-gateway; fi
 
-curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-    "$OFFICIAL_INSTALLER_URL" --output "$INSTALLER_TMP"
-chmod 0700 "$INSTALLER_TMP"
-chown hermes:hermes "$INSTALLER_TMP"
-runuser -u hermes -- env \
-    HOME=/var/lib/hermes HERMES_HOME=/var/lib/hermes/.hermes \
-    bash "$INSTALLER_TMP" --skip-setup
-
-HERMES_BIN="$(runuser -u hermes -- env \
-    HOME=/var/lib/hermes HERMES_HOME=/var/lib/hermes/.hermes \
-    PATH=/var/lib/hermes/.local/bin:/var/lib/hermes/.hermes/bin:/usr/local/bin:/usr/bin:/bin \
-    sh -c 'command -v hermes')"
-UV_BIN="$(runuser -u hermes -- env \
-    HOME=/var/lib/hermes HERMES_HOME=/var/lib/hermes/.hermes \
-    PATH=/var/lib/hermes/.hermes/bin:/var/lib/hermes/.local/bin:/usr/local/bin:/usr/bin:/bin \
-    sh -c 'command -v uv')"
-HERMES_BIN="$(readlink -f -- "$HERMES_BIN")"
-UV_BIN="$(readlink -f -- "$UV_BIN")"
-if [ ! -x "$HERMES_BIN" ] || [ ! -x "$UV_BIN" ]; then
-    printf '%s\n' 'Ошибка: не удалось обнаружить исполняемые файлы Hermes и uv.' >&2
-    exit 1
-fi
-case "$HERMES_BIN:$UV_BIN" in
-    *[!A-Za-z0-9_./:+-]*)
-        printf '%s\n' 'Ошибка: unsafe executable path returned by Hermes installation.' >&2
-        exit 1
-        ;;
-esac
-
-HERMES_PYTHON="$(head -n 1 "$HERMES_BIN" | sed 's/^#!//')"
-if [ "${HERMES_PYTHON#/}" = "$HERMES_PYTHON" ] || [ ! -x "$HERMES_PYTHON" ]; then
-    printf '%s\n' 'Ошибка: Hermes не указывает на абсолютный Python из своей среды.' >&2
-    exit 1
-fi
-runuser -u hermes -- "$UV_BIN" pip install \
-    --python "$HERMES_PYTHON" 'slixmpp>=1.12,<2' pytest
-
-systemctl disable --now hermes-gateway 2>/dev/null || true
-install -d -o hermes -g hermes -m 0700 "$(dirname -- "$PLUGIN_DEST")"
-rm -rf -- "$PLUGIN_DEST"
-cp -a -- "$PLUGIN_SOURCE" "$PLUGIN_DEST"
+if [ -e "$PLUGIN_DEST" ]; then mv -- "$PLUGIN_DEST" "$PLUGIN_BACKUP"; fi
+mv -- "$PLUGIN_STAGE" "$PLUGIN_DEST"
+PLUGIN_SWAPPED=1
+if [ "${HERMES_TEST_FAIL_COPY:-0}" = 1 ]; then false; fi
+if [ -e "$UNIT_FILE" ]; then mv -- "$UNIT_FILE" "$UNIT_BACKUP"; fi
+mv -- "$UNIT_STAGE" "$UNIT_FILE"
+UNIT_SWAPPED=1
 chown -R hermes:hermes "$PLUGIN_DEST"
+chown root:root "$UNIT_FILE"
 chmod -R go-rwx "$PLUGIN_DEST"
-
-install -d -o root -g hermes -m 0750 /etc/hermes
-if [ ! -e "$ENV_FILE" ]; then
-    install -o hermes -g hermes -m 0600 "$SCRIPT_DIR/hermes.env.example" "$ENV_FILE"
-fi
-
-sed "s|^ExecStart=.*|ExecStart=$HERMES_BIN gateway run|" \
-    "$SCRIPT_DIR/hermes-gateway.service" >"$UNIT_TMP"
-chmod 0644 "$UNIT_TMP"
-systemd-analyze verify "$UNIT_TMP"
-install -o root -g root -m 0644 "$UNIT_TMP" "$UNIT_FILE"
+chmod 0644 "$UNIT_FILE"
 systemctl daemon-reload
+if [ "$WAS_ENABLED" = 1 ]; then systemctl disable hermes-gateway; fi
 
-printf '%s\n' \
-    'Установка завершена. Служба остановлена и отключена.' \
-    'Настройте provider и XMPP-секреты по README, затем включите службу вручную.'
+rm -rf -- "$PLUGIN_BACKUP"
+rm -f -- "$UNIT_BACKUP"
+TRANSACTION=0
+printf 'Установка Hermes %s завершена. Служба остановлена и отключена.\n' "$HERMES_RELEASE"

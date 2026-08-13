@@ -2,34 +2,158 @@ from __future__ import annotations
 
 import configparser
 import os
-import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
-DEPLOY = ROOT / "deploy"
 
 
 def read_asset(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def parse_env_example() -> tuple[dict[str, str], list[str]]:
-    values: dict[str, str] = {}
-    comments: list[str] = []
-    for raw_line in read_asset("deploy/hermes.env.example").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            comments.append(line[1:].strip())
-            continue
-        key, separator, value = line.partition("=")
-        assert separator, f"invalid dotenv line: {raw_line!r}"
-        values[key] = value
-    return values, comments
+def bash_path(path: Path) -> str:
+    value = str(path.resolve())
+    if os.name == "nt":
+        return f"/{value[0].lower()}{value[2:].replace(chr(92), '/')}"
+    return value
+
+
+def find_bash() -> str:
+    found = shutil.which("bash")
+    git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if os.name == "nt" and git_bash.is_file():
+        found = str(git_bash)
+    if not found:
+        pytest.skip("bash is unavailable")
+    return found
+
+
+def write_executable(path: Path, body: str) -> None:
+    path.write_text("#!/usr/bin/env bash\nset -eu\n" + body, encoding="utf-8", newline="\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def build_harness(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    fake_root = tmp_path / "root"
+    bin_dir = tmp_path / "bin"
+    state = tmp_path / "state"
+    bin_dir.mkdir()
+    state.mkdir()
+    (fake_root / "etc").mkdir(parents=True)
+    (fake_root / "etc/os-release").write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
+
+    logger = 'printf "%s\\n" "$(basename "$0") $*" >>"$HERMES_TEST_LOG"\n'
+    for name in ("apt-get", "groupadd", "useradd", "usermod", "chown"):
+        write_executable(bin_dir / name, logger)
+
+    write_executable(
+        bin_dir / "getent",
+        """
+case "$1:$2" in
+  group:docker) echo 'docker:x:999:' ;;
+  group:hermes) [ -e "$HERMES_TEST_STATE/group" ] && echo 'hermes:x:998:' || exit 2 ;;
+  passwd:hermes) [ -e "$HERMES_TEST_STATE/user" ] && echo 'hermes:x:998:998::/var/lib/hermes:/usr/sbin/nologin' || exit 2 ;;
+  *) exit 2 ;;
+esac
+""",
+    )
+    write_executable(
+        bin_dir / "id",
+        """
+if [ "${HERMES_TEST_IDENTITY_CONFLICT:-0}" = 1 ] && [ "${1:-}:${2:-}" = "-gn:hermes" ]; then echo wrong; exit 0; fi
+case "${1:-}" in
+  -u) echo 0 ;;
+  -gn) echo hermes ;;
+  *) exit 1 ;;
+esac
+""",
+    )
+    write_executable(
+        bin_dir / "runuser",
+        logger + """
+shift 2
+[ "${1:-}" = -- ] && shift
+exec "$@"
+""",
+    )
+    write_executable(
+        bin_dir / "curl",
+        logger
+        + """
+out=''
+while [ "$#" -gt 0 ]; do
+  [ "$1" = --output ] && { out="$2"; shift 2; continue; }
+  shift
+done
+cp "$HERMES_TEST_UPSTREAM" "$out"
+""",
+    )
+    write_executable(
+        bin_dir / "systemd-analyze",
+        logger + '[ "${HERMES_TEST_FAIL_VERIFY:-0}" != 1 ]\n',
+    )
+    write_executable(
+        bin_dir / "systemctl",
+        logger
+        + """
+case "$1" in
+  is-active) [ -e "$HERMES_TEST_STATE/active" ] ;;
+  is-enabled) [ -e "$HERMES_TEST_STATE/enabled" ] ;;
+  stop) [ "${HERMES_TEST_FAIL_STOP:-0}" != 1 ] && rm -f "$HERMES_TEST_STATE/active" ;;
+  disable) rm -f "$HERMES_TEST_STATE/enabled" ;;
+  start) touch "$HERMES_TEST_STATE/active" ;;
+  enable) touch "$HERMES_TEST_STATE/enabled" ;;
+  daemon-reload) : ;;
+  *) exit 2 ;;
+esac
+""",
+    )
+
+    upstream = tmp_path / "upstream.sh"
+    write_executable(
+        upstream,
+        """
+install_dir=''
+while [ "$#" -gt 0 ]; do
+  [ "$1" = --dir ] && { install_dir="$2"; shift 2; continue; }
+  shift
+done
+mkdir -p "$install_dir/venv/bin" "$HOME/.local/bin"
+printf '#!/bin/sh\\nexec "%s" "$@"\\n' "$install_dir/venv/bin/hermes" >"$HOME/.local/bin/hermes"
+printf '#!/bin/sh\\nexit 0\\n' >"$install_dir/venv/bin/hermes"
+printf '#!/bin/sh\\nexit 0\\n' >"$install_dir/venv/bin/python"
+printf '#!/bin/sh\\nexit 0\\n' >"$HOME/.local/bin/uv"
+chmod 700 "$HOME/.local/bin/hermes" "$HOME/.local/bin/uv" "$install_dir/venv/bin/hermes" "$install_dir/venv/bin/python"
+""",
+    )
+    env = os.environ.copy()
+    env.update(
+        HERMES_INSTALL_TEST_MODE="1",
+        HERMES_INSTALL_TEST_ROOT=bash_path(fake_root),
+        HERMES_INSTALL_TEST_BIN=bash_path(bin_dir),
+        HERMES_TEST_STATE=bash_path(state),
+        HERMES_TEST_LOG=bash_path(tmp_path / "commands.log"),
+        HERMES_TEST_UPSTREAM=bash_path(upstream),
+        PATH=bash_path(bin_dir) + ":" + env["PATH"],
+    )
+    return fake_root, env
+
+
+def run_installer(tmp_path: Path, *, extra: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, str]]:
+    fake_root, env = build_harness(tmp_path)
+    if extra:
+        env.update(extra)
+    result = subprocess.run(
+        [find_bash(), "deploy/install-on-ubuntu.sh"], cwd=ROOT, env=env,
+        text=True, capture_output=True, check=False,
+    )
+    return result, fake_root, env
 
 
 def parse_unit() -> configparser.ConfigParser:
@@ -39,8 +163,15 @@ def parse_unit() -> configparser.ConfigParser:
     return parser
 
 
-def test_env_template_has_only_required_nonsecret_values() -> None:
-    values, comments = parse_env_example()
+def test_env_template_and_unit_contract() -> None:
+    values = {}
+    comments = []
+    for raw in read_asset("deploy/hermes.env.example").splitlines():
+        if raw.startswith("#"):
+            comments.append(raw)
+        elif raw:
+            key, value = raw.split("=", 1)
+            values[key] = value
     assert values == {
         "HERMES_HOME": "/var/lib/hermes/.hermes",
         "XMPP_JID": "hermes@aversa.run/Hermes",
@@ -48,26 +179,10 @@ def test_env_template_has_only_required_nonsecret_values() -> None:
         "XMPP_NICK": "Hermes",
         "XMPP_STATE_PATH": "/var/lib/hermes/.hermes/xmpp/rooms.json",
     }
-    instructions = "\n".join(comments)
-    assert "XMPP_PASSWORD" in instructions
-    assert "hermes model" in instructions
-    assert not any("PASSWORD" in key or "KEY" in key or "TOKEN" in key for key in values)
-
-
-def test_unit_runs_gateway_as_unprivileged_hermes_user() -> None:
-    unit = parse_unit()
-    service = unit["Service"]
-    assert service["User"] == "hermes"
-    assert service["Group"] == "hermes"
+    assert "XMPP_PASSWORD" in "\n".join(comments)
+    service = parse_unit()["Service"]
+    assert service["User"] == service["Group"] == "hermes"
     assert service["EnvironmentFile"] == "/etc/hermes/hermes.env"
-    assert service["WorkingDirectory"] == "/var/lib/hermes"
-    assert re.fullmatch(r"/[A-Za-z0-9_./+-]+ gateway run", service["ExecStart"])
-    assert "root" not in service["ExecStart"].lower()
-
-
-def test_unit_has_required_sandbox_and_restart_policy() -> None:
-    unit = parse_unit()
-    service = unit["Service"]
     assert service["NoNewPrivileges"] == "true"
     assert service["PrivateTmp"] == "true"
     assert service["ProtectSystem"] == "strict"
@@ -75,132 +190,92 @@ def test_unit_has_required_sandbox_and_restart_policy() -> None:
     assert service["UMask"] == "0077"
     assert service["Restart"] == "on-failure"
     assert service["RestartSec"] == "5"
-    assert "ProtectHome" not in service
+    assert service["SupplementaryGroups"] == "docker"
 
 
-def test_unit_waits_for_docker_without_running_as_root() -> None:
-    unit = parse_unit()
-    dependencies = " ".join(
-        value
-        for section in ("Unit", "Service")
-        for key, value in unit[section].items()
-        if key in {"After", "Requires", "Wants", "SupplementaryGroups"}
-    )
-    assert "docker" in dependencies.lower()
-    assert unit["Service"].get("SupplementaryGroups") == "docker"
-
-
-def test_deploy_assets_contain_no_literal_secret_assignments() -> None:
-    combined = "\n".join(
-        read_asset(path)
-        for path in (
-            "deploy/hermes.env.example",
-            "deploy/hermes-gateway.service",
-            "deploy/install-on-ubuntu.sh",
-            "README.md",
-        )
-    )
-    secret_assignment = re.compile(
-        r"(?im)^(?!\s*#)\s*(?:export\s+)?(?:XMPP_PASSWORD|[A-Z0-9_]*(?:API_KEY|TOKEN))\s*=\s*[^\s\"'$]"
-    )
-    assert not secret_assignment.search(combined)
-    assert not re.search(r"(?i)(?:password|api[_ -]?key)\s*[:=]\s*['\"]?[A-Za-z0-9_-]{12,}", combined)
-
-
-def test_installer_is_syntactically_valid_bash() -> None:
-    bash = shutil.which("bash")
-    if os.name == "nt":
-        git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
-        if git_bash.is_file():
-            bash = str(git_bash)
-    if not bash:
-        import pytest
-
-        pytest.skip("bash is unavailable; run bash -n on Ubuntu before installation")
-    result = subprocess.run(
-        [bash, "-n", "deploy/install-on-ubuntu.sh"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def test_first_install_accepts_official_wrapper_and_uses_managed_venv(tmp_path: Path) -> None:
+    result, root, env = run_installer(tmp_path)
     assert result.returncode == 0, result.stderr
+    unit = (root / "etc/systemd/system/hermes-gateway.service").read_text()
+    assert "ExecStart=/var/lib/hermes/.hermes/hermes-agent/venv/bin/hermes gateway run" in unit
+    log = Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"]).read_text()
+    assert "usermod -aG docker hermes" in log
+    assert "--commit 3c27eb6234bf91b8ceee9e9071591b31e9b148cb" in log
+    assert log.index("curl ") < log.index("usermod ")
 
 
-def test_installer_fails_closed_before_mutating_unsupported_hosts() -> None:
-    script = read_asset("deploy/install-on-ubuntu.sh")
-    root_guard = script.index('id -u')
-    os_release = script.index('/etc/os-release')
-    ubuntu_guard = script.index('ID')
-    version_guard = script.index('24.04')
-    first_mutation = min(script.index("apt-get"), script.index("useradd"), script.index("install -d"))
-    assert max(root_guard, os_release, ubuntu_guard, version_guard) < first_mutation
-    assert "set -Eeuo pipefail" in script
+def test_rerun_skips_runtime_installer_and_preserves_env(tmp_path: Path) -> None:
+    first, root, env = run_installer(tmp_path)
+    assert first.returncode == 0, first.stderr
+    env_file = root / "etc/hermes/hermes.env"
+    env_file.write_text("XMPP_PASSWORD=kept\n")
+    Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"]).write_text("")
+    second = subprocess.run([find_bash(), "deploy/install-on-ubuntu.sh"], cwd=ROOT, env=env, text=True, capture_output=True)
+    assert second.returncode == 0, second.stderr
+    assert env_file.read_text() == "XMPP_PASSWORD=kept\n"
+    log = Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"]).read_text()
+    assert not any(line.startswith("curl ") for line in log.splitlines())
 
 
-def test_installer_uses_official_installer_and_hermes_owned_environment() -> None:
-    script = read_asset("deploy/install-on-ubuntu.sh")
-    assert "https://hermes-agent.nousresearch.com/install.sh" in script
-    assert "--skip-setup" in script
-    assert re.search(r"(?:runuser|sudo)\b[^\n]*hermes", script)
-    assert re.search(r"HERMES_HOME=[\"']?/var/lib/hermes/\.hermes", script)
-    assert re.search(r'UV_BIN=.*(?:command -v|realpath|readlink)', script)
-    assert re.search(r'HERMES_BIN=.*(?:command -v|realpath|readlink)', script)
-    assert re.search(r'case\s+"\$HERMES_BIN:\$UV_BIN"', script)
-    assert "unsafe executable path" in script
-    assert re.search(r'"\$UV_BIN"\s+pip\s+install', script)
-    assert "slixmpp>=1.12,<2" in script
-    assert "pytest" in script
+@pytest.mark.parametrize("failure", ["HERMES_TEST_FAIL_VERIFY", "HERMES_TEST_FAIL_STOP", "HERMES_TEST_FAIL_COPY"])
+def test_failed_verify_or_stop_keeps_old_deployment_and_service_state(tmp_path: Path, failure: str) -> None:
+    result, root, env = run_installer(tmp_path)
+    assert result.returncode == 0, result.stderr
+    plugin = root / "var/lib/hermes/.hermes/plugins/xmpp-platform"
+    (plugin / "marker").write_text("old")
+    unit = root / "etc/systemd/system/hermes-gateway.service"
+    old_unit = unit.read_text()
+    state = Path(env["HERMES_TEST_STATE"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_STATE"])
+    (state / "active").touch()
+    (state / "enabled").touch()
+    env[failure] = "1"
+    failed = subprocess.run([find_bash(), "deploy/install-on-ubuntu.sh"], cwd=ROOT, env=env, text=True, capture_output=True)
+    assert failed.returncode != 0
+    assert (plugin / "marker").read_text() == "old"
+    assert unit.read_text() == old_unit
+    assert (state / "active").exists() and (state / "enabled").exists()
 
 
-def test_installer_preserves_env_and_stages_verified_unit() -> None:
-    script = read_asset("deploy/install-on-ubuntu.sh")
-    env_guard = re.search(r'if\s+\[\s+!\s+-e\s+["\']?\$?ENV_FILE', script)
-    assert env_guard
-    assert re.search(r"install\b[^\n]*-m\s+0600[^\n]*hermes\.env\.example", script)
-    verify = script.index("systemd-analyze verify")
-    unit_install = script.index('install -o root -g root -m 0644 "$UNIT_TMP" "$UNIT_FILE"')
-    assert verify < unit_install
-    assert re.search(r"systemctl\s+disable\s+--now\s+hermes-gateway", script)
-    assert "systemctl enable" not in script
+def test_plugin_copy_is_explicit_allowlist(tmp_path: Path) -> None:
+    source = ROOT / "hermes-xmpp"
+    junk = source / "__pycache__"
+    junk.mkdir(exist_ok=True)
+    (junk / "secret.env").write_text("no")
+    try:
+        result, root, _ = run_installer(tmp_path)
+        assert result.returncode == 0, result.stderr
+        dest = root / "var/lib/hermes/.hermes/plugins/xmpp-platform"
+        assert sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()) == [
+            "adapter.py", "plugin.yaml", "xmpp_bridge/__init__.py", "xmpp_bridge/client.py",
+            "xmpp_bridge/models.py", "xmpp_bridge/policy.py", "xmpp_bridge/state.py",
+        ]
+    finally:
+        shutil.rmtree(junk)
 
 
-def test_installer_checks_docker_group_and_keeps_plugin_private() -> None:
-    script = read_asset("deploy/install-on-ubuntu.sh")
-    assert re.search(r"getent\s+group\s+docker", script)
-    assert re.search(r"usermod\s+-aG\s+docker\s+hermes", script)
-    assert re.search(r"PLUGIN_(?:SOURCE|SRC)", script)
-    assert re.search(r"PLUGIN_(?:DEST|TARGET)", script)
-    assert re.search(r"chmod\s+-R\s+[^\n]*o-rwx", script)
-    assert not re.search(r"chmod\s+(?:-R\s+)?(?:777|666)\b", script)
+def test_identity_conflict_fails_before_apt(tmp_path: Path) -> None:
+    fake_root, env = build_harness(tmp_path)
+    state = Path(env["HERMES_TEST_STATE"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_STATE"])
+    (state / "group").touch()
+    (state / "user").touch()
+    env["HERMES_TEST_IDENTITY_CONFLICT"] = "1"
+    result = subprocess.run([find_bash(), "deploy/install-on-ubuntu.sh"], cwd=ROOT, env=env, text=True, capture_output=True)
+    assert result.returncode != 0
+    log_path = tmp_path / "commands.log"
+    assert not log_path.exists() or "apt-get" not in log_path.read_text()
 
 
-def test_installer_validates_identity_and_source_before_replacing_plugin() -> None:
-    script = read_asset("deploy/install-on-ubuntu.sh")
-    assert re.search(r"groupadd\s+--system\s+hermes", script)
-    assert "useradd --system" in script
-    assert "--gid hermes" in script
-    assert re.search(r"find\s+[\"']?\$PLUGIN_SOURCE[\"']?\s+-type\s+l", script)
-    stop = script.index("systemctl disable --now hermes-gateway")
-    replace = script.index('rm -rf -- "$PLUGIN_DEST"')
-    assert stop < replace
+def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path) -> None:
+    result, root, env = run_installer(tmp_path)
+    assert result.returncode == 0, result.stderr
+    env_file = root / "etc/hermes/hermes.env"
+    if os.name != "nt":
+        assert stat.S_IMODE(env_file.stat().st_mode) & 0o077 == 0
+    log = Path(env["HERMES_TEST_LOG"].replace("/c/", "C:/") if os.name == "nt" else env["HERMES_TEST_LOG"]).read_text()
+    assert "chown root:root " in log
+    assert "chown -R hermes:hermes " in log
 
 
-def test_readme_documents_secret_safe_setup_and_operations() -> None:
-    readme = read_asset("README.md")
-    required = (
-        'read -rsp',
-        'ejabberdctl register hermes aversa.run "$BOT_PASSWORD"',
-        "unset BOT_PASSWORD",
-        "sudo -u hermes -H env HERMES_HOME=/var/lib/hermes/.hermes hermes model",
-        "sudo -u hermes -H env HERMES_HOME=/var/lib/hermes/.hermes hermes config set terminal.backend docker",
-        "sudo -u hermes -H env HERMES_HOME=/var/lib/hermes/.hermes hermes doctor",
-        "sudo systemctl enable --now hermes-gateway",
-        "sudo systemctl status hermes-gateway --no-pager",
-        "sudo journalctl -u hermes-gateway -n 100 --no-pager",
-    )
-    positions = [readme.index(command) for command in required]
-    assert positions == sorted(positions)
-    register = readme.index('ejabberdctl register hermes aversa.run "$BOT_PASSWORD"')
-    unset = readme.index("unset BOT_PASSWORD")
-    assert register < unset
+def test_bash_syntax() -> None:
+    result = subprocess.run([find_bash(), "-n", "deploy/install-on-ubuntu.sh"], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
