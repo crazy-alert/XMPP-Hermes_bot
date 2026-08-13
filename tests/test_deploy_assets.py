@@ -226,6 +226,12 @@ def test_shipped_installer_has_no_test_mode_or_fault_hooks() -> None:
     assert "HERMES_TEST_FAIL" not in script
 
 
+def test_official_installer_digest_matches_audited_pinned_commit() -> None:
+    script = read_asset("deploy/install-on-ubuntu.sh")
+    assert "HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb" in script
+    assert "INSTALLER_SHA256=45f589461248c7a6ec3aecd7522a69dd49c5c8dbf4798ba1296af5c0c5e7ccd3" in script
+
+
 @pytest.mark.parametrize(
     ("marker", "old_asset"),
     [
@@ -339,3 +345,10 @@ def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path)
 def test_bash_syntax() -> None:
     result = subprocess.run([find_bash(), "-n", "deploy/install-on-ubuntu.sh"], cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_unix_deployment_assets_are_forced_to_lf_in_archives() -> None:
+    attributes = read_asset(".gitattributes").splitlines()
+    assert "deploy/*.sh text eol=lf" in attributes
+    assert "deploy/*.service text eol=lf" in attributes
+    assert "deploy/*.example text eol=lf" in attributes

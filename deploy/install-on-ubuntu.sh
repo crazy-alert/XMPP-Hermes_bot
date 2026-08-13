@@ -46,7 +46,7 @@ UNIT_FILE=$(path_at /etc/systemd/system/hermes-gateway.service)
 
 HERMES_RELEASE=v2026.8.3
 HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb
-INSTALLER_SHA256=ed34c600de6e952234b278d7c8b8d05ec4790c0e1dec2ea2a86e5b3bfaa5b0a1
+INSTALLER_SHA256=45f589461248c7a6ec3aecd7522a69dd49c5c8dbf4798ba1296af5c0c5e7ccd3
 OFFICIAL_INSTALLER_URL=https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_COMMIT/scripts/install.sh
 
 if [ ! -f "$PLUGIN_SOURCE/adapter.py" ] || [ ! -f "$PLUGIN_SOURCE/plugin.yaml" ] || [ ! -d "$PLUGIN_SOURCE/xmpp_bridge" ]; then
