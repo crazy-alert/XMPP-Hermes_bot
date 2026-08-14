@@ -172,8 +172,29 @@ def test_client_registers_tls_safe_xeps_and_bounded_reconnect_delays(tmp_path):
     client = make_client(tmp_path)
 
     assert {"xep_0030", "xep_0045", "xep_0085", "xep_0198", "xep_0249", "xep_0461"} <= set(client.plugin)
-    assert client.disable_starttls is False
+    assert client.enable_direct_tls is False
+    assert client.enable_starttls is True
     assert client.RECONNECT_DELAYS == (1, 2, 5, 10, 30, 60)
+
+
+def test_direct_tls_uses_slixmpp_stream_flags_instead_of_connect_keyword(tmp_path):
+    client = HermesXmppClient(
+        XmppClientConfig(
+            BOT_JID,
+            "not-a-real-password",
+            "Hermes",
+            RoomState(tmp_path / "rooms.json"),
+            "xmpp.example.test",
+            5223,
+            True,
+        ),
+        lambda event: None,
+        lambda event: None,
+    )
+
+    assert client.enable_direct_tls is True
+    assert client.enable_starttls is False
+    assert client._connect_kwargs() == {}
 
 
 def capture_outbound(client):
@@ -245,7 +266,7 @@ def test_connect_and_wait_waits_for_session_start_not_tcp_future(tmp_path, caplo
 
         ready = asyncio.create_task(client.connect_and_wait())
         await asyncio.sleep(0)
-        assert connected == [("xmpp.example.test", 5223, {"use_ssl": True})]
+        assert connected == [("xmpp.example.test", 5223, {})]
         assert not ready.done()
 
         client.event("session_start")
@@ -433,7 +454,7 @@ def test_unexpected_connection_lost_schedules_exact_reconnect_sequence_and_reset
     asyncio.run(scenario())
 
 
-def test_direct_tls_reconnect_passes_use_ssl_to_real_connect_call(tmp_path):
+def test_direct_tls_reconnect_uses_stream_tls_configuration(tmp_path):
     async def scenario():
         client = HermesXmppClient(
             XmppClientConfig(
@@ -461,7 +482,7 @@ def test_direct_tls_reconnect_passes_use_ssl_to_real_connect_call(tmp_path):
 
         await client._reconnect_after_delay()
 
-        assert reconnects == [("xmpp.example.test", 5223, {"use_ssl": True})]
+        assert reconnects == [("xmpp.example.test", 5223, {})]
         await client.stop()
 
     asyncio.run(scenario())
