@@ -272,7 +272,7 @@ apt-get() { :; }
 dpkg() { return 0; }
 docker() { [ "${1:-}" = info ]; }
 getent() { [ "${1:-}:${2:-}" = group:docker ]; }
-git() { case "$*" in *'rev-parse HEAD'*) printf '%s\\n' "$TEST_REF";; esac; }
+git() { case "$*" in *'rev-parse'*) printf '%s\\n' "$TEST_REF";; esac; }
 systemctl() { printf 'systemctl %s\\n' "$*" >>"$TEST_LOG"; }
 runuser() { shift 3; "$@"; }
 chown() { :; }
@@ -1280,6 +1280,13 @@ def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path)
 def test_bash_syntax() -> None:
     result = subprocess.run([find_bash(), "-n", "deploy/install-on-ubuntu.sh"], cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_bootstrap_has_a_pinned_default_release_for_one_line_install() -> None:
+    script = read_asset("installer.sh")
+    assert "DEFAULT_REF=v2026.08.14" in script
+    assert "REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}" in script
+    assert "release tag or exact 40-character Git commit" in script
 
 
 def test_unix_deployment_assets_are_forced_to_lf_in_archives() -> None:

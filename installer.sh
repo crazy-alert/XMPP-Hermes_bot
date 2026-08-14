@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 REPOSITORY=https://github.com/crazy-alert/XMPP-Hermes_bot.git
-REF=${HERMES_INSTALL_REF:-}
+DEFAULT_REF=v2026.08.14
+REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}
 STAGE=''
 PASSWORD=''
 
@@ -18,7 +19,7 @@ fail() {
 }
 
 usage() {
-    printf 'Usage: %s --ref <40-hex-commit>\n' "$0" >&2
+    printf 'Usage: %s [--ref <release-tag-or-40-hex-commit>]\n' "$0" >&2
     exit 2
 }
 
@@ -30,7 +31,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || fail 'run this installer as root'
-[ -n "$REF" ] && [[ "$REF" =~ ^[0-9a-fA-F]{40}$ ]] || fail 'an exact 40-character Git commit is required'
+[[ "$REF" =~ ^[0-9a-fA-F]{40}$ || "$REF" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || fail 'a release tag or exact 40-character Git commit is required'
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] && dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04 || fail 'Ubuntu 24.04 or newer is required'
 
@@ -62,7 +63,8 @@ git init -q "$STAGE"
 git -C "$STAGE" remote add origin "$REPOSITORY"
 git -C "$STAGE" fetch --depth=1 origin "$REF"
 git -C "$STAGE" checkout -q --detach FETCH_HEAD
-[ "$(git -C "$STAGE" rev-parse HEAD)" = "${REF,,}" ] || fail 'checked out commit does not match the requested ref'
+EXPECTED_COMMIT=$(git -C "$STAGE" rev-parse "$REF^{commit}")
+[ "$(git -C "$STAGE" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] || fail 'checked out commit does not match the requested ref'
 [ -f "$STAGE/deploy/install-on-ubuntu.sh" ] || fail 'verified checkout has no deployment installer'
 
 HERMES_DEFER_SERVICE_START=1 bash "$STAGE/deploy/install-on-ubuntu.sh"
