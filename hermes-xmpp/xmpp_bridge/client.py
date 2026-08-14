@@ -104,6 +104,7 @@ class HermesXmppClient(ClientXMPP):
         error_events = ("failed_auth", "ssl_invalid_chain")
         for event_name in error_events:
             self.add_event_handler(event_name, terminal_failure)
+        attempt_observer = None
         try:
             result = self.connect(self.config.host, self.config.port, **self._connect_kwargs())
             if inspect.isawaitable(result):
