@@ -233,7 +233,7 @@ secure_runtime_root "$HERMES_HOME_DISK"
 secure_runtime_root "$HERMES_CACHE_DISK"
 runuser -u hermes -- mkdir -p -- "$(path_at /var/lib/hermes/.local/bin)" "$PLUGIN_PARENT"
 runuser -u hermes -- chmod 0700 -- "$(path_at /var/lib/hermes/.local/bin)" "$PLUGIN_PARENT"
-secure_dir "$(dirname -- "$ENV_FILE")" root root 0750
+secure_dir "$(dirname -- "$ENV_FILE")" root hermes 0750
 secure_dir "$(dirname -- "$UNIT_FILE")" root root 0755
 
 INSTALLER_TMP=$(mktemp "$(path_at /var/lib/hermes)/.hermes-installer.XXXXXX")
