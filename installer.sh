@@ -90,7 +90,7 @@ printf '\nXMPP configuration:\n' >&2
 
 read_value() {
     local prompt=$1 destination=$2 value
-    printf '%s' "$prompt" >&2
+    printf '%s\n' "$prompt" >&2
     read_line value || fail 'configuration cancelled'
     value=${value%$'\r'}
     printf -v "$destination" '%s' "$value"
