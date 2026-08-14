@@ -83,7 +83,8 @@ EXPECTED_COMMIT=$(git -C "$STAGE" rev-parse FETCH_HEAD) || fail 'could not resol
 [ "$(git -C "$STAGE" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] || fail 'checked out commit does not match the requested ref'
 [ -f "$STAGE/deploy/install-on-ubuntu.sh" ] || fail 'verified checkout has no deployment installer'
 
-HERMES_DEFER_SERVICE_START=1 bash "$STAGE/deploy/install-on-ubuntu.sh"
+# Hermes' upstream installer must not consume answers intended for XMPP setup.
+HERMES_DEFER_SERVICE_START=1 bash "$STAGE/deploy/install-on-ubuntu.sh" </dev/null
 systemctl disable --now hermes-gateway
 
 read_value() {
