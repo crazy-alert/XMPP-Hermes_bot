@@ -1302,6 +1302,8 @@ def test_bootstrap_reads_pipeline_prompts_from_terminal() -> None:
     assert "exec 3</dev/tty" in script
     assert "[ -t 1 ]" in script
     assert "read_line" in script
+    assert "HERMES_INSTALLER_REEXEC" in script
+    assert 'exec bash "$SELF_TMP" "$@" </dev/tty' in script
 
 
 def test_bootstrap_collects_xmpp_data_before_the_upstream_installer() -> None:

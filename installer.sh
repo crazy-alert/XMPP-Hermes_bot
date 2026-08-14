@@ -5,10 +5,27 @@ REPOSITORY=https://github.com/crazy-alert/XMPP-Hermes_bot.git
 REF=${HERMES_INSTALL_REF:-main}
 STAGE=''
 PASSWORD=''
+SELF_TMP=${HERMES_INSTALLER_SELF_TMP:-}
+
+# A piped interactive installer must not share stdin with its own source code.
+if [ ! -t 0 ] && [ -r /dev/tty ] && [ "${HERMES_INSTALLER_REEXEC:-0}" != 1 ]; then
+    SELF_TMP=$(mktemp /tmp/hermes-xmpp-installer.XXXXXX)
+    if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        "https://raw.githubusercontent.com/crazy-alert/XMPP-Hermes_bot/main/installer.sh?timestamp=$(date +%s%N)" \
+        --output "$SELF_TMP"; then
+        rm -f -- "$SELF_TMP"
+        printf '%s\n' 'Error: could not prepare the interactive installer.' >&2
+        exit 1
+    fi
+    chmod 0700 "$SELF_TMP"
+    export HERMES_INSTALLER_REEXEC=1 HERMES_INSTALLER_SELF_TMP="$SELF_TMP"
+    exec bash "$SELF_TMP" "$@" </dev/tty
+fi
 
 cleanup() {
     PASSWORD=''
     [ -z "$STAGE" ] || rm -rf -- "$STAGE"
+    [ -z "$SELF_TMP" ] || rm -f -- "$SELF_TMP"
 }
 trap cleanup EXIT HUP INT TERM
 
