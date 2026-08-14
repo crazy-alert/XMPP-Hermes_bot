@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPOSITORY=https://github.com/crazy-alert/XMPP-Hermes_bot.git
-DEFAULT_REF=v2026.08.14
+DEFAULT_REF=v2026.08.15
 REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}
 STAGE=''
 PASSWORD=''

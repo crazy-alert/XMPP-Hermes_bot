@@ -15,7 +15,7 @@ sudo bash deploy/install-on-ubuntu.sh
 Для установки без предварительного `git clone` скачайте bootstrap-скрипт:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/crazy-alert/XMPP-Hermes_bot/main/installer.sh \
+curl -fsSL "https://raw.githubusercontent.com/crazy-alert/XMPP-Hermes_bot/main/installer.sh?timestamp=$(date +%s%N)" \
   | sudo bash
 ```
 
