@@ -53,6 +53,7 @@ REBOOT_SERVICE_FILE=$(path_at /etc/systemd/system/hermes-reboot-helper.service)
 REBOOT_PATH_FILE=$(path_at /etc/systemd/system/hermes-reboot-helper.path)
 REBOOT_SPOOL_DIR=$(path_at /var/lib/hermes/reboot-spool)
 REBOOT_CONTROL_DIR=$(path_at /var/lib/hermes/reboot-control)
+MANAGED_ENV_FILE=$(path_at /etc/hermes/.env)
 
 HERMES_RELEASE=v2026.8.3
 HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb
@@ -345,6 +346,14 @@ if ! validate_runtime; then
         --skip-setup --skip-browser --dir "$HERMES_AGENT_DISK" \
         --hermes-home "$HERMES_HOME_DISK" --commit "$HERMES_COMMIT"
     validate_runtime || { printf '%s\n' 'Ошибка: установленная среда Hermes не прошла проверку.' >&2; exit 1; }
+fi
+if [ -e "$MANAGED_ENV_FILE" ] || [ -L "$MANAGED_ENV_FILE" ]; then
+    [ -f "$MANAGED_ENV_FILE" ] && [ ! -L "$MANAGED_ENV_FILE" ] || {
+        printf '%s\n' 'Error: /etc/hermes/.env must be a regular file.' >&2
+        exit 1
+    }
+    chown root:hermes "$MANAGED_ENV_FILE"
+    chmod 0640 "$MANAGED_ENV_FILE"
 fi
 printf '%s\n' 'Installing XMPP Python dependencies...' >&2
 runuser -u hermes -- env HOME="$HERMES_ACCOUNT_HOME_DISK" HERMES_HOME="$HERMES_HOME_DISK" \
