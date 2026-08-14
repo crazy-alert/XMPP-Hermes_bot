@@ -48,6 +48,11 @@ UV_BIN_DISK=$(path_at "$UV_BIN")
 PLUGIN_DEST=$(path_at /var/lib/hermes/.hermes/plugins/xmpp-platform)
 ENV_FILE=$(path_at /etc/hermes/hermes.env)
 UNIT_FILE=$(path_at /etc/systemd/system/hermes-gateway.service)
+REBOOT_HELPER_DISK=$(path_at /usr/local/libexec/hermes-reboot-helper)
+REBOOT_SERVICE_FILE=$(path_at /etc/systemd/system/hermes-reboot-helper.service)
+REBOOT_PATH_FILE=$(path_at /etc/systemd/system/hermes-reboot-helper.path)
+REBOOT_SPOOL_DIR=$(path_at /var/lib/hermes/reboot-spool)
+REBOOT_CONTROL_DIR=$(path_at /var/lib/hermes/reboot-control)
 
 HERMES_RELEASE=v2026.8.3
 HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb
@@ -58,6 +63,12 @@ if [ ! -f "$PLUGIN_SOURCE/adapter.py" ] || [ ! -f "$PLUGIN_SOURCE/plugin.yaml" ]
     printf 'Ошибка: неполный источник плагина: %s\n' "$PLUGIN_SOURCE" >&2
     exit 1
 fi
+for asset in hermes-reboot-helper.sh hermes-reboot-helper.service hermes-reboot-helper.path; do
+    if [ ! -f "$SCRIPT_DIR/$asset" ] || [ -L "$SCRIPT_DIR/$asset" ]; then
+        printf 'Error: missing safe reboot helper asset: %s\n' "$asset" >&2
+        exit 1
+    fi
+done
 if find "$PLUGIN_SOURCE" \( -type l -o \( ! -type d ! -type f \) \) -print -quit | grep -q .; then
     printf '%s\n' 'Ошибка: источник плагина содержит ссылку или нерегулярный файл.' >&2
     exit 1
@@ -189,11 +200,25 @@ runuser -u hermes -- sh -c '
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+apt-get install -y --no-install-recommends python3
 apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev
 
 reject_unsafe_existing_dir "$HERMES_ACCOUNT_HOME_DISK"
 if [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then
     printf '%s\n' 'Ошибка: /var/lib/hermes перестал быть доверенным каталогом root:root 0755.' >&2
+    exit 1
+fi
+reject_unsafe_existing_dir "$REBOOT_SPOOL_DIR"
+reject_unsafe_existing_dir "$REBOOT_CONTROL_DIR"
+secure_dir "$(dirname -- "$REBOOT_HELPER_DISK")" root root 0755
+secure_dir "$REBOOT_SPOOL_DIR" root hermes 0730
+secure_dir "$REBOOT_CONTROL_DIR" root root 0700
+if [ -L "$REBOOT_SPOOL_DIR" ] || [ "$(stat -c %U:%G:%a "$REBOOT_SPOOL_DIR")" != root:hermes:730 ]; then
+    printf '%s\n' 'Error: unsafe Hermes reboot spool.' >&2
+    exit 1
+fi
+if [ -L "$REBOOT_CONTROL_DIR" ] || [ "$(stat -c %U:%G:%a "$REBOOT_CONTROL_DIR")" != root:root:700 ]; then
+    printf '%s\n' 'Error: unsafe Hermes reboot control directory.' >&2
     exit 1
 fi
 secure_runtime_root "$HERMES_LOCAL_DISK"
@@ -208,6 +233,18 @@ INSTALLER_TMP=$(mktemp "$(path_at /var/lib/hermes)/.hermes-installer.XXXXXX")
 PLUGIN_SOURCE_STAGE=$(mktemp -d "$(path_at /var/lib/hermes)/.xmpp-source.XXXXXX")
 PLUGIN_STAGE=$(runuser -u hermes -- mktemp -d "$(dirname -- "$PLUGIN_DEST")/.xmpp-platform.stage.XXXXXX")
 UNIT_STAGE=$(mktemp "$(dirname -- "$UNIT_FILE")/.hermes-gateway.stage.XXXXXX")
+REBOOT_HELPER_STAGE=$(mktemp "$(dirname -- "$REBOOT_HELPER_DISK")/.hermes-reboot-helper.stage.XXXXXX")
+REBOOT_SERVICE_STAGE=$(mktemp "$(dirname -- "$REBOOT_SERVICE_FILE")/.hermes-reboot-helper.service.stage.XXXXXX")
+REBOOT_PATH_STAGE=$(mktemp "$(dirname -- "$REBOOT_PATH_FILE")/.hermes-reboot-helper.path.stage.XXXXXX")
+REBOOT_HELPER_BACKUP=$REBOOT_HELPER_DISK.backup.$$
+REBOOT_SERVICE_BACKUP=$REBOOT_SERVICE_FILE.backup.$$
+REBOOT_PATH_BACKUP=$REBOOT_PATH_FILE.backup.$$
+REBOOT_HELPER_SWAPPED=0
+REBOOT_SERVICE_SWAPPED=0
+REBOOT_PATH_SWAPPED=0
+REBOOT_HELPER_BACKED_UP=0
+REBOOT_SERVICE_BACKED_UP=0
+REBOOT_PATH_BACKED_UP=0
 PLUGIN_BACKUP=$PLUGIN_DEST.backup.$$
 UNIT_BACKUP=$UNIT_FILE.backup.$$
 PLUGIN_SWAPPED=0
@@ -232,7 +269,13 @@ rollback() {
         [ "$WAS_ENABLED" = 0 ] || systemctl enable hermes-gateway >/dev/null 2>&1 || true
         [ "$WAS_ACTIVE" = 0 ] || systemctl start hermes-gateway >/dev/null 2>&1 || true
     fi
-    rm -rf -- "$INSTALLER_TMP" "$PLUGIN_SOURCE_STAGE" "$UNIT_STAGE"
+    if [ "$REBOOT_HELPER_SWAPPED" = 1 ]; then rm -f -- "$REBOOT_HELPER_DISK"; fi
+    if [ "$REBOOT_SERVICE_SWAPPED" = 1 ]; then rm -f -- "$REBOOT_SERVICE_FILE"; fi
+    if [ "$REBOOT_PATH_SWAPPED" = 1 ]; then rm -f -- "$REBOOT_PATH_FILE"; fi
+    if [ "$REBOOT_HELPER_BACKED_UP" = 1 ] && [ -e "$REBOOT_HELPER_BACKUP" ]; then mv -- "$REBOOT_HELPER_BACKUP" "$REBOOT_HELPER_DISK"; fi
+    if [ "$REBOOT_SERVICE_BACKED_UP" = 1 ] && [ -e "$REBOOT_SERVICE_BACKUP" ]; then mv -- "$REBOOT_SERVICE_BACKUP" "$REBOOT_SERVICE_FILE"; fi
+    if [ "$REBOOT_PATH_BACKED_UP" = 1 ] && [ -e "$REBOOT_PATH_BACKUP" ]; then mv -- "$REBOOT_PATH_BACKUP" "$REBOOT_PATH_FILE"; fi
+    rm -rf -- "$INSTALLER_TMP" "$PLUGIN_SOURCE_STAGE" "$UNIT_STAGE" "$REBOOT_HELPER_STAGE" "$REBOOT_SERVICE_STAGE" "$REBOOT_PATH_STAGE"
     runuser -u hermes -- rm -rf -- "$PLUGIN_STAGE"
     exit "$status"
 }
@@ -249,6 +292,30 @@ validate_runtime() {
         "$1" --version >/dev/null
         "$3" --version >/dev/null
     ' sh "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK" "$HERMES_HOME_DISK"
+}
+
+install_root_asset() {
+    source=$1
+    destination=$2
+    mode=$3
+    if [ -e "$destination" ] || [ -L "$destination" ]; then
+        [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+        [ "$(stat -c %U:%G "$destination")" = root:root ] || return 1
+    fi
+    install -o root -g root -m "$mode" -- "$source" "$destination"
+    [ -f "$destination" ] && [ ! -L "$destination" ] && [ "$(stat -c %U:%G:%a "$destination")" = "root:root:$mode" ]
+}
+
+backup_root_asset() {
+    source=$1
+    backup=$2
+    backed_up=$3
+    if [ -e "$source" ] || [ -L "$source" ]; then
+        [ -f "$source" ] && [ ! -L "$source" ] || return 1
+        [ "$(stat -c %U:%G "$source")" = root:root ] || return 1
+        mv -- "$source" "$backup"
+        printf -v "$backed_up" '%s' 1
+    fi
 }
 
 # Runtime installation is separate and idempotent. Docker access is granted only after validation.
@@ -283,7 +350,15 @@ runuser -u hermes -- sh -c '
 
 sed "s|^ExecStart=.*|ExecStart=$HERMES_BIN gateway run|" "$SCRIPT_DIR/hermes-gateway.service" >"$UNIT_STAGE"
 chmod 0644 "$UNIT_STAGE"
-systemd-analyze verify "$UNIT_STAGE"
+cp -- "$SCRIPT_DIR/hermes-reboot-helper.sh" "$REBOOT_HELPER_STAGE"
+cp -- "$SCRIPT_DIR/hermes-reboot-helper.service" "$REBOOT_SERVICE_STAGE"
+cp -- "$SCRIPT_DIR/hermes-reboot-helper.path" "$REBOOT_PATH_STAGE"
+chmod 0755 "$REBOOT_HELPER_STAGE"
+chmod 0644 "$REBOOT_SERVICE_STAGE" "$REBOOT_PATH_STAGE"
+backup_root_asset "$REBOOT_HELPER_DISK" "$REBOOT_HELPER_BACKUP" REBOOT_HELPER_BACKED_UP
+install_root_asset "$REBOOT_HELPER_STAGE" "$REBOOT_HELPER_DISK" 755
+REBOOT_HELPER_SWAPPED=1
+systemd-analyze verify "$UNIT_STAGE" "$REBOOT_SERVICE_STAGE" "$REBOOT_PATH_STAGE"
 
 # Preserve env content, reject unsafe file types, and enforce manager-only secrets.
 if [ -e "$ENV_FILE" ] || [ -L "$ENV_FILE" ]; then
@@ -315,7 +390,14 @@ UNIT_SWAPPED=1
 chown root:root "$UNIT_FILE"
 runuser -u hermes -- chmod -R go-rwx "$PLUGIN_DEST"
 chmod 0644 "$UNIT_FILE"
+backup_root_asset "$REBOOT_SERVICE_FILE" "$REBOOT_SERVICE_BACKUP" REBOOT_SERVICE_BACKED_UP
+install_root_asset "$REBOOT_SERVICE_STAGE" "$REBOOT_SERVICE_FILE" 644
+REBOOT_SERVICE_SWAPPED=1
+backup_root_asset "$REBOOT_PATH_FILE" "$REBOOT_PATH_BACKUP" REBOOT_PATH_BACKED_UP
+install_root_asset "$REBOOT_PATH_STAGE" "$REBOOT_PATH_FILE" 644
+REBOOT_PATH_SWAPPED=1
 systemctl daemon-reload
+systemctl enable --now hermes-reboot-helper.path
 if [ "$WAS_ENABLED" = 1 ]; then systemctl disable hermes-gateway; fi
 
 if ! systemctl cat hermes-gateway >/dev/null; then
@@ -329,6 +411,7 @@ fi
 
 runuser -u hermes -- rm -rf -- "$PLUGIN_BACKUP"
 rm -f -- "$UNIT_BACKUP"
+rm -f -- "$REBOOT_HELPER_BACKUP" "$REBOOT_SERVICE_BACKUP" "$REBOOT_PATH_BACKUP"
 TRANSACTION=0
 if [ "${HERMES_DEFER_SERVICE_START:-0}" != 1 ] && confirm_service_start; then
     if ! systemctl enable --now hermes-gateway \

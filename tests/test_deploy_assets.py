@@ -123,6 +123,7 @@ cp "$HERMES_TEST_UPSTREAM" "$out"
 case "$1" in
   enable)
     if [ "${2:-}" = --now ] && [ "${3:-}" = docker ]; then touch "$HERMES_TEST_STATE/docker-daemon"; exit 0; fi
+    [ "${3:-}" != hermes-reboot-helper.path ] || exit 0
     [ "${HERMES_TEST_FAIL_ENABLE_NOW:-0}" != 1 ] || exit 1
     touch "$HERMES_TEST_STATE/enabled"
     [ "${2:-}" != --now ] || [ "${HERMES_TEST_FALSE_ENABLE:-0}" = 1 ] || touch "$HERMES_TEST_STATE/active"
@@ -191,10 +192,15 @@ def generated_installer(
         'SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)': f"SCRIPT_DIR={deploy!r}",
         'REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)': f"REPO_DIR={repo!r}",
         '    install -d -o "$2" -g "$3" -m "$4" "$1"': '    mkdir -p -- "$1"\n    chmod "$4" "$1"',
+        '    install -o root -g root -m "$mode" -- "$source" "$destination"': '    cp -- "$source" "$destination"\n    chmod "$mode" "$destination"',
         '    if [ ! -d "$directory" ] || [ -L "$directory" ] || [ "$(stat -c %U "$directory")" != hermes ]; then': '    if [ ! -d "$directory" ] || [ -L "$directory" ]; then',
         '        test -z "$(find "$4" -xdev ! -user hermes -print -quit)" || exit 1': '        : # ownership is asserted through the chown stub in this generated copy',
         'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ] || [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then': 'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ]; then',
         'if [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then': 'if [ -L "$HERMES_ACCOUNT_HOME_DISK" ]; then',
+        'if [ -L "$REBOOT_SPOOL_DIR" ] || [ "$(stat -c %U:%G:%a "$REBOOT_SPOOL_DIR")" != root:hermes:730 ]; then': 'if [ -L "$REBOOT_SPOOL_DIR" ]; then',
+        'if [ -L "$REBOOT_CONTROL_DIR" ] || [ "$(stat -c %U:%G:%a "$REBOOT_CONTROL_DIR")" != root:root:700 ]; then': 'if [ -L "$REBOOT_CONTROL_DIR" ]; then',
+        '        [ "$(stat -c %U:%G "$destination")" = root:root ] || return 1': '        : # ownership is asserted by the production installer',
+        '    [ -f "$destination" ] && [ ! -L "$destination" ] && [ "$(stat -c %U:%G:%a "$destination")" = "root:root:$mode" ]': '    [ -f "$destination" ] && [ ! -L "$destination" ]',
         'in /var/lib/hermes/*) : ;;': f'in {prefix}/var/lib/hermes/*) : ;;',
         '    printf \'%s  %s\\n\' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status': '    : # fake upstream fixture; production digest check is unchanged',
     }
@@ -358,6 +364,131 @@ def parse_unit() -> configparser.ConfigParser:
     parser.optionxform = str
     parser.read_string(read_asset("deploy/hermes-gateway.service"))
     return parser
+
+
+def parse_reboot_unit(relative: str) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    parser.read_string(read_asset(relative))
+    return parser
+
+
+def generated_reboot_helper(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Exercise the helper against an isolated filesystem without test hooks in production."""
+    if os.name == "nt":
+        pytest.skip("reboot helper harness requires POSIX ownership and openat semantics")
+    spool = tmp_path / "spool"
+    control = tmp_path / "control"
+    bin_dir = tmp_path / "bin"
+    rebooted = tmp_path / "rebooted"
+    spool.mkdir()
+    control.mkdir()
+    bin_dir.mkdir()
+    write_executable(bin_dir / "systemctl", f'[ "${{1:-}}" = reboot ] && touch {bash_path(rebooted)!r}\n')
+    source = read_asset("deploy/hermes-reboot-helper.sh")
+    replacements = {
+        "SPOOL_DIR=/var/lib/hermes/reboot-spool": f"SPOOL_DIR={bash_path(spool)!r}",
+        "CONTROL_DIR=/var/lib/hermes/reboot-control": f"CONTROL_DIR={bash_path(control)!r}",
+        "assert_root_owned_directory() {": "assert_root_owned_directory() { return 0; }\n\n# test replacement\nunused_assert_root_owned_directory() {",
+        "assert_spool_directory() {": "assert_spool_directory() { return 0; }\n\n# test replacement\nunused_assert_spool_directory() {",
+        'if [ "$(id -u)" -ne 0 ]; then': "if false; then",
+        "/usr/bin/python3 -": f"{bash_path(Path(os.sys.executable))!r} -",
+        "import grp\n": "",
+        "import pwd\n": "",
+        "/usr/bin/systemctl reboot": f"{bash_path(bin_dir / 'systemctl')!r} reboot",
+        "/usr/bin/sleep 5": ": # no delay in the isolated harness",
+        "expected_uid = pwd.getpwnam(\"hermes\").pw_uid": "expected_uid = os.fstat(fd).st_uid",
+        "expected_gid = grp.getgrnam(\"hermes\").gr_gid": "expected_gid = os.fstat(fd).st_gid",
+        "or stat.S_IMODE(metadata.st_mode) != 0o600\n": "",
+        'getattr(os, "O_NOFOLLOW", 0)': "0",
+        'control_fd = os.open(control_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))': "control_fd = None",
+        "            dir_fd=control_fd,\n": "",
+        "        os.close(control_fd)": "        pass",
+    }
+    for old, new in replacements.items():
+        assert old in source, old
+        source = source.replace(old, new, 1)
+    script = tmp_path / "reboot-helper-under-test.sh"
+    script.write_text(source, encoding="utf-8", newline="\n")
+    return script, spool, control, rebooted
+
+
+def test_reboot_helper_units_confine_the_root_action_to_a_typed_spool() -> None:
+    service = parse_reboot_unit("deploy/hermes-reboot-helper.service")["Service"]
+    path = parse_reboot_unit("deploy/hermes-reboot-helper.path")["Path"]
+
+    assert service["User"] == service["Group"] == "root"
+    assert service["ExecStart"] == "/usr/local/libexec/hermes-reboot-helper"
+    assert service["NoNewPrivileges"] == "true"
+    assert service["ProtectSystem"] == "strict"
+    assert service["PrivateTmp"] == "true"
+    assert service["ReadWritePaths"] == "/var/lib/hermes/reboot-spool /var/lib/hermes/reboot-control"
+    assert path["PathExists"] == "/var/lib/hermes/reboot-spool/request.json"
+    assert path["Unit"] == "hermes-reboot-helper.service"
+    assert parse_reboot_unit("deploy/hermes-reboot-helper.path")["Install"]["WantedBy"] == "multi-user.target"
+
+
+def test_reboot_helper_consumes_only_canonical_request_and_never_uses_input_as_argv(tmp_path: Path) -> None:
+    helper, spool, control, rebooted = generated_reboot_helper(tmp_path)
+    request = spool / "request.json"
+    nonce = "0123456789abcdef0123456789abcdef"
+    request.write_text(json.dumps({"action": "reboot", "nonce": nonce, "version": 1}, separators=(",", ":")))
+    request.chmod(0o600)
+
+    first = subprocess.run([find_bash(), str(helper)], cwd=control, text=True, capture_output=True, check=False)
+
+    assert first.returncode == 0, first.stderr
+    assert not request.exists()
+    assert (control / nonce).is_file()
+    assert rebooted.is_file()
+    rebooted.unlink()
+    request.write_text(json.dumps({"action": "reboot", "nonce": nonce, "version": 1}, separators=(",", ":")))
+    request.chmod(0o600)
+    replay = subprocess.run([find_bash(), str(helper)], cwd=control, text=True, capture_output=True, check=False)
+    assert replay.returncode != 0
+    assert not request.exists()
+    assert not rebooted.exists()
+    request.write_text('{"action":"reboot","nonce":"$(touch pwned)","version":1}')
+    request.chmod(0o600)
+    invalid = subprocess.run([find_bash(), str(helper)], cwd=tmp_path, text=True, capture_output=True, check=False)
+    assert invalid.returncode != 0
+    assert not (tmp_path / "pwned").exists()
+    assert not rebooted.exists()
+
+
+def test_reboot_helper_rejects_symlink_request_without_reboot(tmp_path: Path) -> None:
+    helper, spool, _, rebooted = generated_reboot_helper(tmp_path)
+    target = tmp_path / "outside-request"
+    target.write_text('{"action":"reboot","nonce":"0123456789abcdef0123456789abcdef","version":1}')
+    try:
+        (spool / "request.json").symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    result = subprocess.run([find_bash(), str(helper)], text=True, capture_output=True, check=False)
+
+    assert result.returncode != 0
+    assert not rebooted.exists()
+    assert target.exists()
+
+
+def test_installer_provisions_and_enables_only_the_reboot_path_helper() -> None:
+    installer = read_asset("deploy/install-on-ubuntu.sh")
+
+    for asset in (
+        "hermes-reboot-helper.sh",
+        "hermes-reboot-helper.service",
+        "hermes-reboot-helper.path",
+    ):
+        assert asset in installer
+    assert "root hermes 0730" in installer
+    assert "root root 0700" in installer
+    assert 'root:hermes:730' in installer
+    assert 'root:root:700' in installer
+    assert 'systemd-analyze verify "$UNIT_STAGE" "$REBOOT_SERVICE_STAGE" "$REBOOT_PATH_STAGE"' in installer
+    assert 'systemctl enable --now hermes-reboot-helper.path' in installer
+    assert 'install -o root -g root -m "$mode"' in installer
+    assert "apt-get install -y --no-install-recommends python3" in installer
 
 
 def test_env_template_and_unit_contract() -> None:
@@ -659,7 +790,7 @@ def test_root_never_traverses_hermes_owned_runtime_paths() -> None:
     script = read_asset("deploy/install-on-ubuntu.sh")
     root_dir_checks = re.findall(r'^reject_unsafe_existing_dir "\$(\w+)"$', script, re.MULTILINE)
     root_file_checks = re.findall(r'^reject_unsafe_existing_file "\$(\w+)"$', script, re.MULTILINE)
-    assert root_dir_checks == ["HERMES_ACCOUNT_HOME_DISK"] * 3
+    assert root_dir_checks == ["HERMES_ACCOUNT_HOME_DISK"] * 3 + ["REBOOT_SPOOL_DIR", "REBOOT_CONTROL_DIR"]
     assert root_file_checks == []
     descendant_preflight = script.index("runuser -u hermes -- sh -c '")
     dependency_install = 'apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev'
@@ -1156,3 +1287,22 @@ def test_unix_deployment_assets_are_forced_to_lf_in_archives() -> None:
     assert "deploy/*.sh text eol=lf" in attributes
     assert "deploy/*.service text eol=lf" in attributes
     assert "deploy/*.example text eol=lf" in attributes
+
+
+def test_readme_documents_assisted_installation_and_support_disclosure() -> None:
+    readme = read_asset("README.md")
+    required = (
+        "Docker Engine",
+        "docker.io",
+        "XMPP host",
+        "First owner bare JID",
+        "hermes doctor",
+        "hermes-gateway",
+        "hermes-reboot-helper",
+        "без OMEMO/E2E",
+        "https://aitunnel.ru?r=43877",
+    )
+    for phrase in required:
+        assert phrase in readme
+    assert "РџР»Р°РіРёРЅ" not in readme
+    assert "sudo bash deploy/install-on-ubuntu.sh" in readme
