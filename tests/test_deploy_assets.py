@@ -1284,9 +1284,8 @@ def test_bash_syntax() -> None:
 
 def test_bootstrap_has_a_pinned_default_release_for_one_line_install() -> None:
     script = read_asset("installer.sh")
-    assert "DEFAULT_REF=v2026.08.18" in script
-    assert "REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}" in script
-    assert "release tag or exact 40-character Git commit" in script
+    assert "REF=${HERMES_INSTALL_REF:-main}" in script
+    assert "invalid Git branch or tag" in script
     assert "rev-parse FETCH_HEAD" in script
 
 

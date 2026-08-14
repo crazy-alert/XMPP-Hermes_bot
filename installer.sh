@@ -2,8 +2,7 @@
 set -Eeuo pipefail
 
 REPOSITORY=https://github.com/crazy-alert/XMPP-Hermes_bot.git
-DEFAULT_REF=v2026.08.18
-REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}
+REF=${HERMES_INSTALL_REF:-main}
 STAGE=''
 PASSWORD=''
 
@@ -36,7 +35,7 @@ read_secret() {
 }
 
 usage() {
-    printf 'Usage: %s [--ref <release-tag-or-40-hex-commit>]\n' "$0" >&2
+    printf 'Usage: %s [--ref <branch-or-tag>]\n' "$0" >&2
     exit 2
 }
 
@@ -48,7 +47,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || fail 'run this installer as root'
-[[ "$REF" =~ ^[0-9a-fA-F]{40}$ || "$REF" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || fail 'a release tag or exact 40-character Git commit is required'
+[[ "$REF" =~ ^[A-Za-z0-9._/-]+$ && "$REF" != *..* && "$REF" != /* && "$REF" != */ ]] || fail 'invalid Git branch or tag'
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] && dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04 || fail 'Ubuntu 24.04 or newer is required'
 
