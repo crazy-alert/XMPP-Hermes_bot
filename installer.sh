@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPOSITORY=https://github.com/crazy-alert/XMPP-Hermes_bot.git
-DEFAULT_REF=v2026.08.16
+DEFAULT_REF=v2026.08.17
 REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}
 STAGE=''
 PASSWORD=''
@@ -16,6 +16,23 @@ trap cleanup EXIT HUP INT TERM
 fail() {
     printf 'Error: %s\n' "$1" >&2
     exit 1
+}
+
+INPUT_FD=0
+if [ ! -t 0 ] && [ -t 1 ] && [ -r /dev/tty ]; then
+    if exec 3</dev/tty 2>/dev/null; then
+        INPUT_FD=3
+    fi
+fi
+
+read_line() {
+    local destination=$1
+    IFS= read -r "$destination" <&"$INPUT_FD"
+}
+
+read_secret() {
+    local destination=$1
+    IFS= read -r -s "$destination" <&"$INPUT_FD"
 }
 
 usage() {
@@ -40,9 +57,9 @@ docker_ready() {
 }
 
 confirm_docker_installation() {
-    [ -t 0 ] || fail 'Docker Engine is unavailable and installation needs interactive confirmation'
+    [ -t "$INPUT_FD" ] || fail 'Docker Engine is unavailable and installation needs interactive confirmation'
     printf '%s' 'Docker Engine is not ready. Install Ubuntu package docker.io? [y/N] '
-    IFS= read -r answer || fail 'installation cancelled'
+    read_line answer || fail 'installation cancelled'
     case "${answer%$'\r'}" in
         y|Y|yes|YES|Yes|д|Д|да|ДА|Да) ;;
         *) fail 'Docker installation declined' ;;
@@ -73,7 +90,7 @@ systemctl disable --now hermes-gateway
 read_value() {
     local prompt=$1 destination=$2 value
     printf '%s' "$prompt" >&2
-    IFS= read -r value || fail 'configuration cancelled'
+    read_line value || fail 'configuration cancelled'
     value=${value%$'\r'}
     printf -v "$destination" '%s' "$value"
 }
@@ -143,7 +160,7 @@ validate_full_jid "$JID" || fail 'invalid bot JID'
 read_value 'Bot nick: ' NICK
 validate_nick "$NICK" || fail 'invalid bot nick'
 printf '%s' 'XMPP password: ' >&2
-IFS= read -r -s PASSWORD || fail 'configuration cancelled'
+read_secret PASSWORD || fail 'configuration cancelled'
 PASSWORD=${PASSWORD%$'\r'}
 printf '\n'
 validate_password "$PASSWORD" || fail 'invalid XMPP password'
@@ -260,7 +277,7 @@ sync -f "$TXN_DIR/.commit"
 sync_dir "$TXN_DIR"
 
 printf '%s' 'Start Hermes service now? [y/N] ' >&2
-IFS= read -r answer || answer=''
+read_line answer || answer=''
 case "${answer%$'\r'}" in
     y|Y|yes|YES|Yes)
         started=0
@@ -274,12 +291,12 @@ case "${answer%$'\r'}" in
             journalctl -u hermes-gateway --no-pager -n 30 >&2 || true
             [ "$attempt" -lt 3 ] || break
             printf '%s' 'JID или пароль могут быть неверными. Ввести полный JID и пароль ещё раз? [y/N] ' >&2
-            IFS= read -r retry || retry=''
+            read_line retry || retry=''
             case "${retry%$'\r'}" in y|Y|yes|YES|Yes|РґР°|Рґ) ;; *) break ;; esac
             read_value 'Bot full JID with resource: ' JID
             validate_full_jid "$JID" || { printf '%s\n' 'Некорректный JID.' >&2; continue; }
             printf '%s' 'XMPP password: ' >&2
-            IFS= read -r -s PASSWORD || PASSWORD=''
+            read_secret PASSWORD || PASSWORD=''
             PASSWORD=${PASSWORD%$'\r'}
             printf '\n' >&2
             validate_password "$PASSWORD" || { printf '%s\n' 'Некорректный пароль.' >&2; continue; }
