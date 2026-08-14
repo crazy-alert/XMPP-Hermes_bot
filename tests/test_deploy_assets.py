@@ -1313,6 +1313,12 @@ def test_bootstrap_collects_xmpp_data_before_the_upstream_installer() -> None:
     assert script.index("preflight_read_value 'Сервер XMPP: '") < script.index("Installing bootstrap dependencies...")
 
 
+def test_bootstrap_derives_nick_from_the_jid_resource() -> None:
+    script = read_asset("installer.sh")
+    assert "NICK=${JID#*/}" in script
+    assert "Имя бота (ник):" not in script
+
+
 def test_bootstrap_reports_download_and_configuration_stages() -> None:
     script = read_asset("installer.sh")
     assert "Installing bootstrap dependencies..." in script

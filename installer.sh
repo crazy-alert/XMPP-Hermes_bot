@@ -141,11 +141,7 @@ while :; do
     preflight_validate_full_jid "$JID" && preflight_validate_utf8 "$JID" && break
     printf '%s\n' 'Некорректный полный JID. Пример: bot@aversa.run/Hermes' >&2
 done
-while :; do
-    preflight_read_value 'Имя бота (ник): ' NICK
-    [ -n "$NICK" ] && [ "${#NICK}" -le 64 ] && [[ ! "$NICK" =~ [[:cntrl:]] ]] && preflight_validate_utf8 "$NICK" && break
-    printf '%s\n' 'Некорректный ник.' >&2
-done
+NICK=${JID#*/}
 printf '%s' 'Пароль XMPP: ' >&2
 read_secret PASSWORD || fail 'configuration cancelled'
 PASSWORD=${PASSWORD%$'\r'}
@@ -370,6 +366,7 @@ case "${answer%$'\r'}" in
             case "${retry%$'\r'}" in y|Y|yes|YES|Yes|РґР°|Рґ) ;; *) break ;; esac
             read_value 'Bot full JID with resource: ' JID
             validate_full_jid "$JID" || { printf '%s\n' 'Некорректный JID.' >&2; continue; }
+            NICK=${JID#*/}
             printf '%s' 'XMPP password: ' >&2
             read_secret PASSWORD || PASSWORD=''
             PASSWORD=${PASSWORD%$'\r'}
