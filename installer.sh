@@ -350,7 +350,7 @@ sync_dir "$TXN_DIR"
 printf '%s' 'Запустить и включить службу Hermes сейчас? [д/Н] ' >&2
 read_line answer || answer=''
 case "${answer%$'\r'}" in
-    y|Y|yes|YES|Yes)
+    y|Y|yes|YES|Yes|д|Д|да|Да|ДА)
         started=0
         for attempt in 1 2 3; do
             if systemctl enable --now hermes-gateway \
@@ -376,5 +376,5 @@ case "${answer%$'\r'}" in
         done
         [ "$started" = 1 ] || fail 'Hermes не запустился; проверьте JID, пароль и журнал службы'
         ;;
-    *) printf '%s\n' 'Hermes is installed and remains stopped.' ;;
+    *) printf '%s\n' 'Hermes установлен, но служба остановлена и отключена.' ;;
 esac
