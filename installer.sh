@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPOSITORY=https://github.com/crazy-alert/XMPP-Hermes_bot.git
-DEFAULT_REF=v2026.08.17
+DEFAULT_REF=v2026.08.18
 REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}
 STAGE=''
 PASSWORD=''
@@ -80,7 +80,7 @@ git init -q "$STAGE"
 git -C "$STAGE" remote add origin "$REPOSITORY"
 git -C "$STAGE" fetch --depth=1 origin "$REF"
 git -C "$STAGE" checkout -q --detach FETCH_HEAD
-EXPECTED_COMMIT=$(git -C "$STAGE" rev-parse "$REF^{commit}")
+EXPECTED_COMMIT=$(git -C "$STAGE" rev-parse FETCH_HEAD) || fail 'could not resolve the downloaded release'
 [ "$(git -C "$STAGE" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] || fail 'checked out commit does not match the requested ref'
 [ -f "$STAGE/deploy/install-on-ubuntu.sh" ] || fail 'verified checkout has no deployment installer'
 
