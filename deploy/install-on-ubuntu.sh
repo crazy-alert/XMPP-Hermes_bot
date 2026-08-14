@@ -188,12 +188,19 @@ runuser -u hermes -- sh -c '
     done
     for file in "$9" "${10}" "${11}"; do
         if test -e "$file" || test -L "$file"; then
-            test -f "$file" && test ! -L "$file" || exit 1
+            if test -L "$file"; then
+                resolved=$(readlink -f -- "$file") || exit 1
+                case "$resolved" in "${12}"/*) : ;; *) exit 1 ;; esac
+                test -f "$resolved" && test ! -L "$resolved" || exit 1
+                test "$(stat -c %U:%G "$resolved")" = hermes:hermes || exit 1
+            else
+                test -f "$file" || exit 1
+            fi
         fi
     done
 ' sh "$HERMES_LOCAL_DISK" "$HERMES_HOME_DISK" "$HERMES_CACHE_DISK" "$PLUGIN_PARENT" "$HERMES_AGENT_DISK" \
     "$HERMES_VENV_DISK" "$HERMES_VENV_BIN_DISK" "$HERMES_BIN_PARENT_DISK" \
-    "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK" || {
+    "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK" "$HERMES_ACCOUNT_HOME_DISK" || {
     printf '%s\n' 'Ошибка: небезопасный существующий путь среды Hermes.' >&2
     exit 1
 }
@@ -232,10 +239,10 @@ secure_dir "$(dirname -- "$UNIT_FILE")" root root 0755
 INSTALLER_TMP=$(mktemp "$(path_at /var/lib/hermes)/.hermes-installer.XXXXXX")
 PLUGIN_SOURCE_STAGE=$(mktemp -d "$(path_at /var/lib/hermes)/.xmpp-source.XXXXXX")
 PLUGIN_STAGE=$(runuser -u hermes -- mktemp -d "$(dirname -- "$PLUGIN_DEST")/.xmpp-platform.stage.XXXXXX")
-UNIT_STAGE=$(mktemp "$(dirname -- "$UNIT_FILE")/.hermes-gateway.stage.XXXXXX")
-REBOOT_HELPER_STAGE=$(mktemp "$(dirname -- "$REBOOT_HELPER_DISK")/.hermes-reboot-helper.stage.XXXXXX")
-REBOOT_SERVICE_STAGE=$(mktemp "$(dirname -- "$REBOOT_SERVICE_FILE")/.hermes-reboot-helper.service.stage.XXXXXX")
-REBOOT_PATH_STAGE=$(mktemp "$(dirname -- "$REBOOT_PATH_FILE")/.hermes-reboot-helper.path.stage.XXXXXX")
+UNIT_STAGE=$(mktemp "$(dirname -- "$UNIT_FILE")/hermes-gateway.stage.XXXXXX.service")
+REBOOT_HELPER_STAGE=$(mktemp "$(dirname -- "$REBOOT_HELPER_DISK")/hermes-reboot-helper.stage.XXXXXX")
+REBOOT_SERVICE_STAGE=$(mktemp "$(dirname -- "$REBOOT_SERVICE_FILE")/hermes-reboot-helper.stage.XXXXXX.service")
+REBOOT_PATH_STAGE=$(mktemp "$(dirname -- "$REBOOT_PATH_FILE")/hermes-reboot-helper.stage.XXXXXX.path")
 REBOOT_HELPER_BACKUP=$REBOOT_HELPER_DISK.backup.$$
 REBOOT_SERVICE_BACKUP=$REBOOT_SERVICE_FILE.backup.$$
 REBOOT_PATH_BACKUP=$REBOOT_PATH_FILE.backup.$$
@@ -285,13 +292,20 @@ validate_runtime() {
     case "$HERMES_BIN_DISK:$HERMES_PYTHON_DISK:$UV_BIN_DISK" in /var/lib/hermes/*) : ;; *) return 1 ;; esac
     runuser -u hermes -- sh -c '
         for executable in "$1" "$2" "$3"; do
-            test -f "$executable" && test ! -L "$executable" && test -x "$executable" || exit 1
+            if test -L "$executable"; then
+                resolved=$(readlink -f -- "$executable") || exit 1
+                case "$resolved" in "$5"/*) : ;; *) exit 1 ;; esac
+                test -f "$resolved" && test ! -L "$resolved" || exit 1
+                test "$(stat -c %U:%G "$resolved")" = hermes:hermes || exit 1
+            else
+                test -f "$executable" && test -x "$executable" || exit 1
+            fi
         done
         test -z "$(find "$4" -xdev ! -user hermes -print -quit)" || exit 1
         "$2" -c "import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)"
         "$1" --version >/dev/null
         "$3" --version >/dev/null
-    ' sh "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK" "$HERMES_HOME_DISK"
+    ' sh "$HERMES_BIN_DISK" "$HERMES_PYTHON_DISK" "$UV_BIN_DISK" "$HERMES_HOME_DISK" "$HERMES_ACCOUNT_HOME_DISK"
 }
 
 install_root_asset() {
@@ -330,7 +344,9 @@ if ! validate_runtime; then
         --hermes-home "$HERMES_HOME_DISK" --commit "$HERMES_COMMIT"
     validate_runtime || { printf '%s\n' 'Ошибка: установленная среда Hermes не прошла проверку.' >&2; exit 1; }
 fi
-runuser -u hermes -- "$UV_BIN_DISK" pip install --python "$HERMES_PYTHON_DISK" 'slixmpp>=1.12,<2' pytest
+runuser -u hermes -- env HOME="$HERMES_ACCOUNT_HOME_DISK" HERMES_HOME="$HERMES_HOME_DISK" \
+    bash -c 'cd "$1" && exec "$2" pip install --python "$3" "slixmpp>=1.12,<2" pytest' \
+    bash "$HERMES_ACCOUNT_HOME_DISK" "$UV_BIN_DISK" "$HERMES_PYTHON_DISK"
 
 # Stage the complete allowlisted plugin before stopping the service.
 cp -- "$PLUGIN_SOURCE/adapter.py" "$PLUGIN_SOURCE/plugin.yaml" "$PLUGIN_SOURCE_STAGE/"
@@ -405,7 +421,10 @@ if ! systemctl cat hermes-gateway >/dev/null; then
     printf '%s\n' 'Error: Hermes service unit is not loaded.' >&2
     exit 1
 fi
-if ! runuser -u hermes -- "$HERMES_BIN_DISK" doctor >/dev/null; then
+if [ "${HERMES_DEFER_SERVICE_START:-0}" = 1 ] && [ ! -e "$ENV_FILE" ]; then
+    printf '%s\n' 'Пропуск doctor: конфигурация будет создана основным установщиком.' >&2
+elif ! runuser -u hermes -- env HOME="$HERMES_ACCOUNT_HOME_DISK" HERMES_HOME="$HERMES_HOME_DISK" \
+    bash -c 'cd "$1" && exec "$2" doctor' bash "$HERMES_ACCOUNT_HOME_DISK" "$HERMES_BIN_DISK" >/dev/null; then
     printf '%s\n' 'Error: Hermes diagnostic check failed.' >&2
     exit 1
 fi
