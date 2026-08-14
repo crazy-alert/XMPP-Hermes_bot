@@ -83,10 +83,56 @@ EXPECTED_COMMIT=$(git -C "$STAGE" rev-parse FETCH_HEAD) || fail 'could not resol
 [ "$(git -C "$STAGE" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] || fail 'checked out commit does not match the requested ref'
 [ -f "$STAGE/deploy/install-on-ubuntu.sh" ] || fail 'verified checkout has no deployment installer'
 
+printf '\nXMPP configuration:\n' >&2
+
+preflight_read_value() {
+    local prompt=$1 destination=$2 value
+    printf '%s\n' "$prompt" >&2
+    read_line value || fail 'configuration cancelled'
+    value=${value%$'\r'}
+    printf -v "$destination" '%s' "$value"
+}
+
+preflight_validate_host() {
+    local value=$1 label
+    [ "${#value}" -le 253 ] || return 1
+    [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]] || return 1
+    IFS=. read -r -a labels <<<"$value"
+    for label in "${labels[@]}"; do [ "${#label}" -le 63 ] || return 1; done
+}
+
+preflight_validate_full_jid() {
+    case "$1" in *['"\\']*) return 1 ;; esac
+    [[ ! "$1" =~ [[:cntrl:]] ]] || return 1
+    [ "${#1}" -le 3071 ] && [[ "$1" =~ ^[^@/:[:space:]]+@[^@/:[:space:]]+/[^/[:space:]]+$ ]]
+}
+
+preflight_validate_bare_jid() {
+    case "$1" in *['"\\']*) return 1 ;; esac
+    [[ ! "$1" =~ [[:cntrl:]] ]] || return 1
+    [ "${#1}" -le 3071 ] && [[ "$1" =~ ^[^@/:[:space:]]+@[^@/:[:space:]]+$ ]]
+}
+
+preflight_read_value 'XMPP host: ' HOST
+preflight_validate_host "$HOST" || fail 'invalid XMPP host'
+preflight_read_value 'XMPP port: ' PORT
+[[ "$PORT" =~ ^[0-9]{1,5}$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || fail 'invalid XMPP port'
+preflight_read_value 'XMPP TLS mode (direct): ' TLS_MODE
+[ "$TLS_MODE" = direct ] || fail 'only direct XMPP TLS is supported'
+preflight_read_value 'Bot full JID with resource: ' JID
+preflight_validate_full_jid "$JID" || fail 'invalid bot JID'
+preflight_read_value 'Bot nick: ' NICK
+[ -n "$NICK" ] && [ "${#NICK}" -le 64 ] && [[ ! "$NICK" =~ [[:cntrl:]] ]] || fail 'invalid bot nick'
+printf '%s' 'XMPP password: ' >&2
+read_secret PASSWORD || fail 'configuration cancelled'
+PASSWORD=${PASSWORD%$'\r'}
+printf '\n' >&2
+[ -n "$PASSWORD" ] && [ "${#PASSWORD}" -le 1024 ] && [[ ! "$PASSWORD" =~ [[:space:][:cntrl:]] ]] || fail 'invalid XMPP password'
+preflight_read_value 'First owner bare JID: ' OWNER
+preflight_validate_bare_jid "$OWNER" || fail 'invalid owner JID'
+
 # Hermes' upstream installer must not consume answers intended for XMPP setup.
 HERMES_DEFER_SERVICE_START=1 bash "$STAGE/deploy/install-on-ubuntu.sh" </dev/null
-
-printf '\nXMPP configuration:\n' >&2
 
 read_value() {
     local prompt=$1 destination=$2 value
@@ -149,24 +195,6 @@ write_xmpp_env() {
     sync -f "$ENV_FILE"
     sync_dir "$ENV_DIR"
 }
-
-read_value 'XMPP host: ' HOST
-validate_host "$HOST" || fail 'invalid XMPP host'
-read_value 'XMPP port: ' PORT
-validate_port "$PORT" || fail 'invalid XMPP port'
-read_value 'XMPP TLS mode (direct): ' TLS_MODE
-[ "$TLS_MODE" = direct ] || fail 'only direct XMPP TLS is supported'
-read_value 'Bot full JID with resource: ' JID
-validate_full_jid "$JID" || fail 'invalid bot JID'
-read_value 'Bot nick: ' NICK
-validate_nick "$NICK" || fail 'invalid bot nick'
-printf '%s' 'XMPP password: ' >&2
-read_secret PASSWORD || fail 'configuration cancelled'
-PASSWORD=${PASSWORD%$'\r'}
-printf '\n'
-validate_password "$PASSWORD" || fail 'invalid XMPP password'
-read_value 'First owner bare JID: ' OWNER
-validate_bare_jid "$OWNER" || fail 'invalid owner JID'
 
 ENV_DIR=/etc/hermes
 ENV_FILE=$ENV_DIR/hermes.env

@@ -1304,6 +1304,12 @@ def test_bootstrap_reads_pipeline_prompts_from_terminal() -> None:
     assert "read_line" in script
 
 
+def test_bootstrap_collects_xmpp_data_before_the_upstream_installer() -> None:
+    script = read_asset("installer.sh")
+    assert script.index("XMPP configuration:") < script.index("HERMES_DEFER_SERVICE_START=1 bash")
+    assert script.index("preflight_read_value 'XMPP host: '") < script.index("HERMES_DEFER_SERVICE_START=1 bash")
+
+
 def test_unix_deployment_assets_are_forced_to_lf_in_archives() -> None:
     attributes = read_asset(".gitattributes").splitlines()
     assert "deploy/*.sh text eol=lf" in attributes
