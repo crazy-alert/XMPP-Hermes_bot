@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Hermes reboot request spool
+
+[Path]
+PathExists=/var/lib/hermes/reboot-spool/request.json
+Unit=hermes-reboot-helper.service
+
+[Install]
+WantedBy=multi-user.target
