@@ -86,6 +86,8 @@ EXPECTED_COMMIT=$(git -C "$STAGE" rev-parse FETCH_HEAD) || fail 'could not resol
 # Hermes' upstream installer must not consume answers intended for XMPP setup.
 HERMES_DEFER_SERVICE_START=1 bash "$STAGE/deploy/install-on-ubuntu.sh" </dev/null
 
+printf '\nXMPP configuration:\n' >&2
+
 read_value() {
     local prompt=$1 destination=$2 value
     printf '%s' "$prompt" >&2
