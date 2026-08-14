@@ -130,11 +130,7 @@ while :; do
     [[ "$PORT" =~ ^[0-9]{1,5}$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] && break
     printf '%s\n' 'Некорректный порт: укажите число от 1 до 65535.' >&2
 done
-while :; do
-    preflight_read_value 'Режим TLS XMPP (direct): ' TLS_MODE
-    [ "$TLS_MODE" = direct ] && break
-    printf '%s\n' 'Поддерживается только режим direct.' >&2
-done
+TLS_MODE=direct
 while :; do
     preflight_read_value 'Полный JID бота с ресурсом: ' JID
     preflight_validate_full_jid "$JID" && break
