@@ -72,18 +72,21 @@ confirm_docker_installation() {
 
 docker_ready || confirm_docker_installation
 
+printf '%s\n' 'Installing bootstrap dependencies...' >&2
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates git
+printf '%s\n' 'Downloading project files...' >&2
 STAGE=$(mktemp -d /tmp/hermes-xmpp.XXXXXX)
 git init -q "$STAGE"
 git -C "$STAGE" remote add origin "$REPOSITORY"
-git -C "$STAGE" fetch --depth=1 origin "$REF"
+timeout 120 env GIT_TERMINAL_PROMPT=0 git -C "$STAGE" fetch --depth=1 origin "$REF" \
+    || fail 'could not download project files from GitHub within two minutes'
 git -C "$STAGE" checkout -q --detach FETCH_HEAD
 EXPECTED_COMMIT=$(git -C "$STAGE" rev-parse FETCH_HEAD) || fail 'could not resolve the downloaded release'
 [ "$(git -C "$STAGE" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] || fail 'checked out commit does not match the requested ref'
 [ -f "$STAGE/deploy/install-on-ubuntu.sh" ] || fail 'verified checkout has no deployment installer'
 
-printf '\nXMPP configuration:\n' >&2
+printf '\nPreparing XMPP configuration...\n\nXMPP configuration:\n' >&2
 
 preflight_read_value() {
     local prompt=$1 destination=$2 value
