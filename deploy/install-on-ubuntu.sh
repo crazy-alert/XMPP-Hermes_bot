@@ -325,7 +325,8 @@ if ! validate_runtime; then
     chown hermes:hermes "$INSTALLER_TMP"
     chmod 0700 "$INSTALLER_TMP"
     runuser -u hermes -- env HOME="$(path_at /var/lib/hermes)" HERMES_HOME="$HERMES_HOME_DISK" \
-        bash "$INSTALLER_TMP" --skip-setup --skip-browser --dir "$HERMES_AGENT_DISK" \
+        bash -c 'cd "$1" && exec bash "$2" "${@:3}"' bash "$(path_at /var/lib/hermes)" "$INSTALLER_TMP" \
+        --skip-setup --skip-browser --dir "$HERMES_AGENT_DISK" \
         --hermes-home "$HERMES_HOME_DISK" --commit "$HERMES_COMMIT"
     validate_runtime || { printf '%s\n' 'Ошибка: установленная среда Hermes не прошла проверку.' >&2; exit 1; }
 fi
