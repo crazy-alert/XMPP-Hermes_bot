@@ -1,0 +1,24 @@
+[Unit]
+Description=Hermes XMPP gateway
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+SupplementaryGroups=docker
+WorkingDirectory=/var/lib/hermes
+EnvironmentFile=/etc/hermes/hermes.env
+ExecStart=/var/lib/hermes/.local/bin/hermes gateway run
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hermes
+
+[Install]
+WantedBy=multi-user.target
