@@ -135,8 +135,7 @@ XMPP_HOST=example.org
 XMPP_PORT=5223
 XMPP_TLS_MODE=direct
 XMPP_ADMIN_STATE_PATH=/var/lib/hermes/.hermes/xmpp/admin.json
-# Заполните секрет вручную; значение намеренно не приводится в документации.
-XMPP_PASSWORD=
+# Добавьте XMPP_PASSWORD вручную; само значение намеренно не приводится в документации.
 ```
 
 Сразу замените демонстрационные значения; не помещайте реальные секреты в Git,
