@@ -1,0 +1,12 @@
+name: xmpp-platform
+kind: platform
+dependencies:
+  - slixmpp>=1.12,<2
+env:
+  XMPP_JID: {required: true, description: "XMPP bot JID, for example bot@example.com/Hermes"}
+  XMPP_PASSWORD: {required: true, type: password, secret: true, description: "XMPP password"}
+  XMPP_ALLOWED_USERS: {required: false, description: "Comma-separated bare JIDs, for example admin@example.com"}
+  XMPP_STATE_PATH: {required: false}
+  XMPP_HOST: {required: false}
+  XMPP_PORT: {required: false}
+  XMPP_NICK: {required: false}
