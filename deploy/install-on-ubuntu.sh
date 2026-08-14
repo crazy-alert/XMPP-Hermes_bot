@@ -334,17 +334,21 @@ backup_root_asset() {
 
 # Runtime installation is separate and idempotent. Docker access is granted only after validation.
 if ! validate_runtime; then
+    printf '%s\n' 'Installing Hermes runtime (Python and uv)...' >&2
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$OFFICIAL_INSTALLER_URL" --output "$INSTALLER_TMP"
     printf '%s  %s\n' "$INSTALLER_SHA256" "$INSTALLER_TMP" | sha256sum --check --status
     chown hermes:hermes "$INSTALLER_TMP"
     chmod 0700 "$INSTALLER_TMP"
     runuser -u hermes -- env HOME="$(path_at /var/lib/hermes)" HERMES_HOME="$HERMES_HOME_DISK" \
+        UV_HTTP_TIMEOUT=30 UV_HTTP_RETRIES=2 \
         bash -c 'cd "$1" && exec bash "$2" "${@:3}"' bash "$(path_at /var/lib/hermes)" "$INSTALLER_TMP" \
         --skip-setup --skip-browser --dir "$HERMES_AGENT_DISK" \
         --hermes-home "$HERMES_HOME_DISK" --commit "$HERMES_COMMIT"
     validate_runtime || { printf '%s\n' 'Ошибка: установленная среда Hermes не прошла проверку.' >&2; exit 1; }
 fi
+printf '%s\n' 'Installing XMPP Python dependencies...' >&2
 runuser -u hermes -- env HOME="$HERMES_ACCOUNT_HOME_DISK" HERMES_HOME="$HERMES_HOME_DISK" \
+    UV_HTTP_TIMEOUT=30 UV_HTTP_RETRIES=2 \
     bash -c 'cd "$1" && exec "$2" pip install --python "$3" "slixmpp>=1.12,<2" pytest' \
     bash "$HERMES_ACCOUNT_HOME_DISK" "$UV_BIN_DISK" "$HERMES_PYTHON_DISK"
 
