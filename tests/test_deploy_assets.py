@@ -1308,6 +1308,7 @@ def test_bootstrap_collects_xmpp_data_before_the_upstream_installer() -> None:
     script = read_asset("installer.sh")
     assert script.index("XMPP configuration:") < script.index("HERMES_DEFER_SERVICE_START=1 bash")
     assert script.index("preflight_read_value 'XMPP host: '") < script.index("HERMES_DEFER_SERVICE_START=1 bash")
+    assert script.index("preflight_read_value 'XMPP host: '") < script.index("Installing bootstrap dependencies...")
 
 
 def test_bootstrap_reports_download_and_configuration_stages() -> None:
