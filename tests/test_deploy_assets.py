@@ -1284,9 +1284,17 @@ def test_bash_syntax() -> None:
 
 def test_bootstrap_has_a_pinned_default_release_for_one_line_install() -> None:
     script = read_asset("installer.sh")
-    assert "DEFAULT_REF=v2026.08.14" in script
+    assert "DEFAULT_REF=v2026.08.16" in script
     assert "REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}" in script
     assert "release tag or exact 40-character Git commit" in script
+
+
+def test_bootstrap_retries_jid_and_password_after_failed_service_start() -> None:
+    script = read_asset("installer.sh")
+    assert "JID или пароль могут быть неверными" in script
+    assert "Bot full JID with resource: " in script
+    assert "XMPP password: " in script
+    assert "write_xmpp_env" in script
 
 
 def test_unix_deployment_assets_are_forced_to_lf_in_archives() -> None:

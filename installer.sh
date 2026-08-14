@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPOSITORY=https://github.com/crazy-alert/XMPP-Hermes_bot.git
-DEFAULT_REF=v2026.08.15
+DEFAULT_REF=v2026.08.16
 REF=${HERMES_INSTALL_REF:-$DEFAULT_REF}
 STAGE=''
 PASSWORD=''
@@ -117,6 +117,19 @@ quote_env() {
     value=${value//\$/\\\$}
     value=${value//\`/\\\`}
     printf '"%s"' "$value"
+}
+
+write_xmpp_env() {
+    local env_tmp
+    env_tmp=$(mktemp "$ENV_DIR/.hermes.env.retry.XXXXXX")
+    chmod 0600 "$env_tmp"
+    printf 'HERMES_HOME=/var/lib/hermes/.hermes\nXMPP_JID=%s\nXMPP_ALLOWED_USERS=%s\nXMPP_NICK=%s\nXMPP_STATE_PATH=/var/lib/hermes/.hermes/xmpp/rooms.json\nXMPP_HOST=%s\nXMPP_PORT=%s\nXMPP_TLS_MODE=%s\nXMPP_ADMIN_STATE_PATH=/var/lib/hermes/.hermes/xmpp/admin.json\nXMPP_PASSWORD=%s\n' \
+        "$(quote_env "$JID")" "$(quote_env "$OWNER")" "$(quote_env "$NICK")" "$(quote_env "$HOST")" "$PORT" "$TLS_MODE" "$(quote_env "$PASSWORD")" >"$env_tmp"
+    chown root:root "$env_tmp"
+    sync -f "$env_tmp"
+    mv -f -- "$env_tmp" "$ENV_FILE"
+    sync -f "$ENV_FILE"
+    sync_dir "$ENV_DIR"
 }
 
 read_value 'XMPP host: ' HOST
@@ -249,6 +262,30 @@ sync_dir "$TXN_DIR"
 printf '%s' 'Start Hermes service now? [y/N] ' >&2
 IFS= read -r answer || answer=''
 case "${answer%$'\r'}" in
-    y|Y|yes|YES|Yes) systemctl enable --now hermes-gateway ;;
+    y|Y|yes|YES|Yes)
+        started=0
+        for attempt in 1 2 3; do
+            if systemctl enable --now hermes-gateway \
+                && systemctl is-active --quiet hermes-gateway; then
+                started=1
+                break
+            fi
+            systemctl status --no-pager hermes-gateway >&2 || true
+            journalctl -u hermes-gateway --no-pager -n 30 >&2 || true
+            [ "$attempt" -lt 3 ] || break
+            printf '%s' 'JID или пароль могут быть неверными. Ввести полный JID и пароль ещё раз? [y/N] ' >&2
+            IFS= read -r retry || retry=''
+            case "${retry%$'\r'}" in y|Y|yes|YES|Yes|РґР°|Рґ) ;; *) break ;; esac
+            read_value 'Bot full JID with resource: ' JID
+            validate_full_jid "$JID" || { printf '%s\n' 'Некорректный JID.' >&2; continue; }
+            printf '%s' 'XMPP password: ' >&2
+            IFS= read -r -s PASSWORD || PASSWORD=''
+            PASSWORD=${PASSWORD%$'\r'}
+            printf '\n' >&2
+            validate_password "$PASSWORD" || { printf '%s\n' 'Некорректный пароль.' >&2; continue; }
+            write_xmpp_env
+        done
+        [ "$started" = 1 ] || fail 'Hermes не запустился; проверьте JID, пароль и журнал службы'
+        ;;
     *) printf '%s\n' 'Hermes is installed and remains stopped.' ;;
 esac
