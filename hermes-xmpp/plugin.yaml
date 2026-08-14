@@ -1,12 +1,15 @@
 name: xmpp-platform
+label: XMPP
 kind: platform
-dependencies:
-  - slixmpp>=1.12,<2
-env:
-  XMPP_JID: {required: true, description: "XMPP bot JID, for example bot@example.com/Hermes"}
-  XMPP_PASSWORD: {required: true, type: password, secret: true, description: "XMPP password"}
-  XMPP_ALLOWED_USERS: {required: false, description: "Comma-separated bare JIDs, for example admin@example.com"}
-  XMPP_STATE_PATH: {required: false}
-  XMPP_HOST: {required: false}
-  XMPP_PORT: {required: false}
-  XMPP_NICK: {required: false}
+version: 1.0.0
+description: XMPP messaging platform for Hermes Agent.
+requires_env:
+  - XMPP_JID
+  - name: XMPP_PASSWORD
+    password: true
+optional_env:
+  - XMPP_ALLOWED_USERS
+  - XMPP_STATE_PATH
+  - XMPP_HOST
+  - XMPP_PORT
+  - XMPP_NICK

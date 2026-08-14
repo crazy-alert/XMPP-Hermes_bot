@@ -46,6 +46,7 @@ HERMES_BIN_DISK=$(path_at "$HERMES_BIN")
 HERMES_PYTHON_DISK=$(path_at "$HERMES_PYTHON")
 UV_BIN_DISK=$(path_at "$UV_BIN")
 PLUGIN_DEST=$(path_at /var/lib/hermes/.hermes/plugins/xmpp-platform)
+PLUGIN_CONFIG_FILE=$(path_at /var/lib/hermes/.hermes/config.yaml)
 ENV_FILE=$(path_at /etc/hermes/hermes.env)
 UNIT_FILE=$(path_at /etc/systemd/system/hermes-gateway.service)
 REBOOT_HELPER_DISK=$(path_at /usr/local/libexec/hermes-reboot-helper)
@@ -60,7 +61,7 @@ HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb
 INSTALLER_SHA256=45f589461248c7a6ec3aecd7522a69dd49c5c8dbf4798ba1296af5c0c5e7ccd3
 OFFICIAL_INSTALLER_URL=https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_COMMIT/scripts/install.sh
 
-if [ ! -f "$PLUGIN_SOURCE/adapter.py" ] || [ ! -f "$PLUGIN_SOURCE/plugin.yaml" ] || [ ! -d "$PLUGIN_SOURCE/xmpp_bridge" ]; then
+if [ ! -f "$PLUGIN_SOURCE/__init__.py" ] || [ ! -f "$PLUGIN_SOURCE/adapter.py" ] || [ ! -f "$PLUGIN_SOURCE/plugin.yaml" ] || [ ! -d "$PLUGIN_SOURCE/xmpp_bridge" ]; then
     printf 'Ошибка: неполный источник плагина: %s\n' "$PLUGIN_SOURCE" >&2
     exit 1
 fi
@@ -362,13 +363,13 @@ runuser -u hermes -- env HOME="$HERMES_ACCOUNT_HOME_DISK" HERMES_HOME="$HERMES_H
     bash "$HERMES_ACCOUNT_HOME_DISK" "$UV_BIN_DISK" "$HERMES_PYTHON_DISK"
 
 # Stage the complete allowlisted plugin before stopping the service.
-cp -- "$PLUGIN_SOURCE/adapter.py" "$PLUGIN_SOURCE/plugin.yaml" "$PLUGIN_SOURCE_STAGE/"
+cp -- "$PLUGIN_SOURCE/__init__.py" "$PLUGIN_SOURCE/adapter.py" "$PLUGIN_SOURCE/plugin.yaml" "$PLUGIN_SOURCE_STAGE/"
 mkdir -p -- "$PLUGIN_SOURCE_STAGE/xmpp_bridge"
 while IFS= read -r source_file; do cp -- "$source_file" "$PLUGIN_SOURCE_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
 chown -R hermes:hermes "$PLUGIN_SOURCE_STAGE"
 chmod -R go-rwx "$PLUGIN_SOURCE_STAGE"
 runuser -u hermes -- sh -c '
-    cp -- "$1/adapter.py" "$1/plugin.yaml" "$2/"
+    cp -- "$1/__init__.py" "$1/adapter.py" "$1/plugin.yaml" "$2/"
     mkdir -p -- "$2/xmpp_bridge"
     for source_file in "$1"/xmpp_bridge/*.py; do
         test -f "$source_file" && test ! -L "$source_file" || exit 1
@@ -377,6 +378,28 @@ runuser -u hermes -- sh -c '
     test -f "$2/xmpp_bridge/__init__.py" && test ! -L "$2/xmpp_bridge/__init__.py" || exit 1
     chmod -R go-rwx "$2"
 ' sh "$PLUGIN_SOURCE_STAGE" "$PLUGIN_STAGE" || { printf '%s\n' 'Ошибка: не удалось подготовить плагин XMPP.' >&2; exit 1; }
+
+runuser -u hermes -- "$HERMES_PYTHON_DISK" -c '
+import sys
+from pathlib import Path
+import yaml
+
+path = Path(sys.argv[1])
+data = yaml.safe_load(path.read_text("utf-8")) if path.exists() else {}
+if not isinstance(data, dict):
+    raise SystemExit("Hermes config.yaml must contain a mapping")
+plugins = data.setdefault("plugins", {})
+if not isinstance(plugins, dict):
+    raise SystemExit("Hermes plugins config must contain a mapping")
+enabled = plugins.setdefault("enabled", [])
+if not isinstance(enabled, list):
+    raise SystemExit("Hermes plugins.enabled must be a list")
+if "xmpp-platform" not in enabled:
+    enabled.append("xmpp-platform")
+tmp = path.with_suffix(".yaml.tmp")
+tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+tmp.replace(path)
+' "$PLUGIN_CONFIG_FILE" || { printf '%s\n' 'Error: could not enable the XMPP plugin.' >&2; exit 1; }
 
 sed "s|^ExecStart=.*|ExecStart=$HERMES_BIN gateway run|" "$SCRIPT_DIR/hermes-gateway.service" >"$UNIT_STAGE"
 chmod 0644 "$UNIT_STAGE"
