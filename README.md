@@ -61,9 +61,8 @@ Docker, пакеты и уже существующие данные Hermes ав
 - пароль XMPP (вводится скрыто);
 - первый owner bare JID (`First owner bare JID`).
 
-В англоязычном интерфейсе эти подсказки называются `XMPP host`, `XMPP port`,
-`XMPP TLS mode`, `Bot full JID with resource`, `Bot nick`, `XMPP password` и
-`First owner bare JID`.
+Установщик задаёт эти вопросы по-русски: сервер и порт XMPP, режим TLS, полный
+JID бота с ресурсом, имя бота, пароль и первый bare JID владельца.
 
 XMPP-аккаунт установщик не создаёт: зарегистрируйте его в своём ejabberd
 заранее. Модель, endpoint, API-токен и дополнительные trusted JID настраиваются

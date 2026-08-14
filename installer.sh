@@ -120,23 +120,47 @@ preflight_validate_bare_jid() {
     [ "${#1}" -le 3071 ] && [[ "$1" =~ ^[^@/:[:space:]]+@[^@/:[:space:]]+$ ]]
 }
 
-preflight_read_value 'XMPP host: ' HOST
-preflight_validate_host "$HOST" || fail 'invalid XMPP host'
-preflight_read_value 'XMPP port: ' PORT
-[[ "$PORT" =~ ^[0-9]{1,5}$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || fail 'invalid XMPP port'
-preflight_read_value 'XMPP TLS mode (direct): ' TLS_MODE
-[ "$TLS_MODE" = direct ] || fail 'only direct XMPP TLS is supported'
-preflight_read_value 'Bot full JID with resource: ' JID
-preflight_validate_full_jid "$JID" || fail 'invalid bot JID'
-preflight_read_value 'Bot nick: ' NICK
-[ -n "$NICK" ] && [ "${#NICK}" -le 64 ] && [[ ! "$NICK" =~ [[:cntrl:]] ]] || fail 'invalid bot nick'
-printf '%s' 'XMPP password: ' >&2
+while :; do
+    preflight_read_value 'Сервер XMPP: ' HOST
+    preflight_validate_host "$HOST" && break
+    printf '%s\n' 'Некорректное имя сервера. Пример: aversa.run' >&2
+done
+while :; do
+    preflight_read_value 'Порт XMPP: ' PORT
+    [[ "$PORT" =~ ^[0-9]{1,5}$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] && break
+    printf '%s\n' 'Некорректный порт: укажите число от 1 до 65535.' >&2
+done
+while :; do
+    preflight_read_value 'Режим TLS XMPP (direct): ' TLS_MODE
+    [ "$TLS_MODE" = direct ] && break
+    printf '%s\n' 'Поддерживается только режим direct.' >&2
+done
+while :; do
+    preflight_read_value 'Полный JID бота с ресурсом: ' JID
+    preflight_validate_full_jid "$JID" && break
+    printf '%s\n' 'Некорректный полный JID. Пример: bot@aversa.run/Hermes' >&2
+done
+while :; do
+    preflight_read_value 'Имя бота (ник): ' NICK
+    [ -n "$NICK" ] && [ "${#NICK}" -le 64 ] && [[ ! "$NICK" =~ [[:cntrl:]] ]] && break
+    printf '%s\n' 'Некорректный ник.' >&2
+done
+printf '%s' 'Пароль XMPP: ' >&2
 read_secret PASSWORD || fail 'configuration cancelled'
 PASSWORD=${PASSWORD%$'\r'}
 printf '\n' >&2
-[ -n "$PASSWORD" ] && [ "${#PASSWORD}" -le 1024 ] && [[ ! "$PASSWORD" =~ [[:space:][:cntrl:]] ]] || fail 'invalid XMPP password'
-preflight_read_value 'First owner bare JID: ' OWNER
-preflight_validate_bare_jid "$OWNER" || fail 'invalid owner JID'
+while ! { [ -n "$PASSWORD" ] && [ "${#PASSWORD}" -le 1024 ] && [[ ! "$PASSWORD" =~ [[:space:][:cntrl:]] ]]; }; do
+    printf '%s\n' 'Некорректный пароль. Повторите ввод.' >&2
+    printf '%s' 'Пароль XMPP: ' >&2
+    read_secret PASSWORD || fail 'configuration cancelled'
+    PASSWORD=${PASSWORD%$'\r'}
+    printf '\n' >&2
+done
+while :; do
+    preflight_read_value 'Первый владелец (bare JID): ' OWNER
+    preflight_validate_bare_jid "$OWNER" && break
+    printf '%s\n' 'Некорректный bare JID. Пример: user@aversa.run' >&2
+done
 
 printf '%s\n' 'Installing bootstrap dependencies...' >&2
 apt-get update
@@ -326,7 +350,7 @@ touch "$TXN_DIR/.commit"
 sync -f "$TXN_DIR/.commit"
 sync_dir "$TXN_DIR"
 
-printf '%s' 'Start Hermes service now? [y/N] ' >&2
+printf '%s' 'Запустить и включить службу Hermes сейчас? [д/Н] ' >&2
 read_line answer || answer=''
 case "${answer%$'\r'}" in
     y|Y|yes|YES|Yes)
