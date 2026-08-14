@@ -14,7 +14,7 @@ MAX_BODY_LENGTH = 4096
 MAX_JID_LENGTH = 512
 MAX_MODEL_LENGTH = 512
 MAX_ENDPOINT_LENGTH = 512
-MAX_TOKEN_LENGTH = 4096
+MAX_INPUT_LENGTH = 4096
 
 
 @dataclass(frozen=True)
@@ -161,7 +161,7 @@ class CommandRouter:
                 self.state.mutate(lambda current: current.with_changes(endpoint=value))
                 return CommandResult(True, "Endpoint обновлён.")
             if command == "/token" and subcommand == "set":
-                self._bounded(value, MAX_TOKEN_LENGTH)
+                self._bounded(value, MAX_INPUT_LENGTH)
                 updated = self.state.set_token(value)
                 return CommandResult(True, f"Токен сохранён: {updated.token_mask}")
             if command == "/doctor":
