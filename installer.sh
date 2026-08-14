@@ -120,6 +120,11 @@ preflight_validate_bare_jid() {
     [ "${#1}" -le 3071 ] && [[ "$1" =~ ^[^@/:[:space:]]+@[^@/:[:space:]]+$ ]]
 }
 
+preflight_validate_utf8() {
+    case "$1" in *'�'*) return 1 ;; esac
+    printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+}
+
 while :; do
     preflight_read_value 'Сервер XMPP: ' HOST
     preflight_validate_host "$HOST" && break
@@ -133,19 +138,19 @@ done
 TLS_MODE=direct
 while :; do
     preflight_read_value 'Полный JID бота с ресурсом: ' JID
-    preflight_validate_full_jid "$JID" && break
+    preflight_validate_full_jid "$JID" && preflight_validate_utf8 "$JID" && break
     printf '%s\n' 'Некорректный полный JID. Пример: bot@aversa.run/Hermes' >&2
 done
 while :; do
     preflight_read_value 'Имя бота (ник): ' NICK
-    [ -n "$NICK" ] && [ "${#NICK}" -le 64 ] && [[ ! "$NICK" =~ [[:cntrl:]] ]] && break
+    [ -n "$NICK" ] && [ "${#NICK}" -le 64 ] && [[ ! "$NICK" =~ [[:cntrl:]] ]] && preflight_validate_utf8 "$NICK" && break
     printf '%s\n' 'Некорректный ник.' >&2
 done
 printf '%s' 'Пароль XMPP: ' >&2
 read_secret PASSWORD || fail 'configuration cancelled'
 PASSWORD=${PASSWORD%$'\r'}
 printf '\n' >&2
-while ! { [ -n "$PASSWORD" ] && [ "${#PASSWORD}" -le 1024 ] && [[ ! "$PASSWORD" =~ [[:space:][:cntrl:]] ]]; }; do
+while ! { [ -n "$PASSWORD" ] && [ "${#PASSWORD}" -le 1024 ] && [[ ! "$PASSWORD" =~ [[:space:][:cntrl:]] ]] && preflight_validate_utf8 "$PASSWORD"; }; do
     printf '%s\n' 'Некорректный пароль. Повторите ввод.' >&2
     printf '%s' 'Пароль XMPP: ' >&2
     read_secret PASSWORD || fail 'configuration cancelled'
@@ -154,7 +159,7 @@ while ! { [ -n "$PASSWORD" ] && [ "${#PASSWORD}" -le 1024 ] && [[ ! "$PASSWORD" 
 done
 while :; do
     preflight_read_value 'Первый владелец (bare JID): ' OWNER
-    preflight_validate_bare_jid "$OWNER" && break
+    preflight_validate_bare_jid "$OWNER" && preflight_validate_utf8 "$OWNER" && break
     printf '%s\n' 'Некорректный bare JID. Пример: user@aversa.run' >&2
 done
 
