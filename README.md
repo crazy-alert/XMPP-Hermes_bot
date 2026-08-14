@@ -12,6 +12,19 @@
 sudo bash deploy/install-on-ubuntu.sh
 ```
 
+Для установки без предварительного `git clone` используйте опубликованный
+commit и скачайте только bootstrap-скрипт:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/crazy-alert/XMPP-Hermes_bot/<COMMIT>/installer.sh \
+  | sudo bash -s -- --ref <COMMIT>
+```
+
+Замените `<COMMIT>` на один и тот же 40-символьный SHA из проверенного релиза.
+Установщик сам создаст временный checkout, проверит, что его HEAD совпадает с
+этим SHA, выполнит установку и удалит временные файлы. Ветка `main` и короткие
+теги намеренно не принимаются.
+
 Docker Engine нужен Hermes как backend для запуска инструментов в изолированных
 контейнерах. Установщик сначала проверяет Docker CLI, группу `docker` и доступность
 daemon. Если проверка не проходит, он предложит установить пакет Ubuntu
