@@ -1317,6 +1317,8 @@ def test_bootstrap_reports_download_and_configuration_stages() -> None:
     assert "Downloading project files..." in script
     assert "timeout 120 env GIT_TERMINAL_PROMPT=0 git" in script
     assert "Preparing XMPP configuration..." in script
+    assert "Checking Docker Engine..." in script
+    assert "timeout 15 docker info" in script
 
 
 def test_unix_deployment_assets_are_forced_to_lf_in_archives() -> None:

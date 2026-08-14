@@ -52,7 +52,7 @@ done
 [ "${ID:-}" = ubuntu ] && dpkg --compare-versions "${VERSION_ID:-0}" ge 24.04 || fail 'Ubuntu 24.04 or newer is required'
 
 docker_ready() {
-    command -v docker >/dev/null 2>&1 && getent group docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+    command -v docker >/dev/null 2>&1 && getent group docker >/dev/null 2>&1 && timeout 15 docker info >/dev/null 2>&1
 }
 
 confirm_docker_installation() {
@@ -70,6 +70,7 @@ confirm_docker_installation() {
     docker_ready || fail 'Docker Engine failed the post-installation check'
 }
 
+printf '%s\n' 'Checking Docker Engine...' >&2
 docker_ready || confirm_docker_installation
 
 printf '\nPreparing XMPP configuration...\n\nXMPP configuration:\n' >&2
