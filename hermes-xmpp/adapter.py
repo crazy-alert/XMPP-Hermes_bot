@@ -12,12 +12,20 @@ from typing import Callable
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
-from xmpp_bridge.client import HermesXmppClient, XmppClientConfig
-from xmpp_bridge.admin_state import AdminState, AdminStateError, ConfigValidationError
-from xmpp_bridge.commands import CommandRouter, RestartGateway
-from xmpp_bridge.models import InboundXmppMessage, XmppInvite
-from xmpp_bridge.policy import normalize_bare_jid, parse_allowlist, route_direct, route_group, snapshot_allowlist
-from xmpp_bridge.state import RoomState
+try:
+    from .xmpp_bridge.admin_state import AdminState, AdminStateError, ConfigValidationError
+    from .xmpp_bridge.client import HermesXmppClient, XmppClientConfig
+    from .xmpp_bridge.commands import CommandRouter, RestartGateway
+    from .xmpp_bridge.models import InboundXmppMessage, XmppInvite
+    from .xmpp_bridge.policy import normalize_bare_jid, parse_allowlist, route_direct, route_group, snapshot_allowlist
+    from .xmpp_bridge.state import RoomState
+except ImportError:  # Direct module import used by focused adapter tests.
+    from xmpp_bridge.admin_state import AdminState, AdminStateError, ConfigValidationError
+    from xmpp_bridge.client import HermesXmppClient, XmppClientConfig
+    from xmpp_bridge.commands import CommandRouter, RestartGateway
+    from xmpp_bridge.models import InboundXmppMessage, XmppInvite
+    from xmpp_bridge.policy import normalize_bare_jid, parse_allowlist, route_direct, route_group, snapshot_allowlist
+    from xmpp_bridge.state import RoomState
 
 logger = logging.getLogger(__name__)
 _CAPACITY = 4096
