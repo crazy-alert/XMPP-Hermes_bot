@@ -1,0 +1,1 @@
+"""XMPP bridge models."""
