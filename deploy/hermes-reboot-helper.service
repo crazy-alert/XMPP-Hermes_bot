@@ -1,0 +1,21 @@
+[Unit]
+Description=Hermes confirmed host reboot helper
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/hermes-reboot-helper
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_SYS_BOOT
+ReadWritePaths=/var/lib/hermes/reboot-spool /var/lib/hermes/reboot-control
