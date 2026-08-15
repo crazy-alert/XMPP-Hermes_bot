@@ -1304,6 +1304,14 @@ def test_env_and_installed_tree_ownership_and_modes_are_enforced(tmp_path: Path)
     assert "runuser -u hermes -- sh -c " in log
 
 
+def test_installer_repairs_only_a_verified_hermes_agent_tree_before_upgrade() -> None:
+    script = read_asset("deploy/install-on-ubuntu.sh")
+
+    assert 'repair_agent_tree "$HERMES_AGENT_DISK"' in script
+    assert 'chown -R --no-dereference hermes:hermes "$directory"' in script
+    assert 'find -P "$directory" -xdev' in script
+
+
 def test_bash_syntax() -> None:
     result = subprocess.run([find_bash(), "-n", "deploy/install-on-ubuntu.sh"], cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

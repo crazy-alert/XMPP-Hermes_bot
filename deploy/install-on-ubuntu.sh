@@ -290,6 +290,16 @@ rollback() {
 }
 trap rollback EXIT
 
+repair_agent_tree() {
+    directory=$1
+    [ -e "$directory" ] || return 0
+    [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+
+    unsafe_entry=$(find -P "$directory" -xdev \( -type l -o \( ! -type d ! -type f \) \) -print -quit) || return 1
+    [ -z "$unsafe_entry" ] || return 1
+    chown -R --no-dereference hermes:hermes "$directory"
+}
+
 validate_runtime() {
     case "$HERMES_BIN_DISK:$HERMES_PYTHON_DISK:$UV_BIN_DISK" in /var/lib/hermes/*) : ;; *) return 1 ;; esac
     runuser -u hermes -- sh -c '
@@ -335,6 +345,10 @@ backup_root_asset() {
 }
 
 # Runtime installation is separate and idempotent. Docker access is granted only after validation.
+repair_agent_tree "$HERMES_AGENT_DISK" || {
+    printf '%s\n' 'Error: unsafe Hermes Agent directory.' >&2
+    exit 1
+}
 if ! validate_runtime; then
     printf '%s\n' 'Installing Hermes runtime (Python and uv)...' >&2
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$OFFICIAL_INSTALLER_URL" --output "$INSTALLER_TMP"
