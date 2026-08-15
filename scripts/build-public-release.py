@@ -30,6 +30,7 @@ PUBLIC_FILES = frozenset(
         "deploy/hermes-reboot-helper.sh",
         "deploy/hermes-reboot-helper.service",
         "deploy/hermes-reboot-helper.path",
+        "hermes-xmpp/__init__.py",
         "hermes-xmpp/adapter.py",
         "hermes-xmpp/plugin.yaml",
         "hermes-xmpp/xmpp_bridge/__init__.py",
