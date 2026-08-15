@@ -62,3 +62,13 @@ def test_apply_does_not_change_config_when_environment_path_is_unsafe(tmp_path):
         HermesRuntimeConfig(home).apply(configured(), "secret-token")
 
     assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_set_image_model_enables_xmpp_image_backend(tmp_path):
+    home = tmp_path / "hermes"
+    home.mkdir()
+
+    HermesRuntimeConfig(home).set_image_model("image-model")
+
+    document = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert document["image_gen"] == {"provider": "xmpp-ai", "model": "image-model"}

@@ -81,6 +81,23 @@ class HermesRuntimeConfig:
         self._atomic_write(self.env_path, env_contents)
         return True
 
+    def set_image_model(self, model: str) -> None:
+        if not isinstance(model, str) or not (model := model.strip()) or len(model) > 512:
+            raise RuntimeConfigError("image model is invalid")
+        document = self._read_yaml()
+        image_gen = document.setdefault("image_gen", {})
+        if not isinstance(image_gen, dict):
+            raise RuntimeConfigError("Hermes image configuration is invalid")
+        image_gen["provider"] = "xmpp-ai"
+        image_gen["model"] = model
+        self._atomic_write(self.config_path, yaml.safe_dump(document, allow_unicode=True, sort_keys=False))
+
+    def image_status(self) -> str:
+        document = self._read_yaml()
+        image_gen = document.get("image_gen", {})
+        model = image_gen.get("model") if isinstance(image_gen, dict) else None
+        return f"Модель изображений: {model}" if isinstance(model, str) and model else "Модель изображений не задана."
+
     def _read_yaml(self) -> dict:
         self._require_safe_home()
         if not self.config_path.exists():

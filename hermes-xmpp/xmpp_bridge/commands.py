@@ -16,6 +16,18 @@ MAX_JID_LENGTH = 512
 MAX_MODEL_LENGTH = 512
 MAX_ENDPOINT_LENGTH = 512
 MAX_INPUT_LENGTH = 4096
+AITUNNEL_API_BASE_URL = "https://api.aitunnel.ru/v1"
+AITUNNEL_KEYS_URL = "https://aitunnel.ru/panel/keys"
+AITUNNEL_REFERRAL_URL = "https://aitunnel.ru?r=43877"
+
+_HELP_TEXT = (
+    "/status\n/config\n/model set <model>\n/setaitunnel\n/endpoint set <url>\n"
+    f"/token set <token> — ключ: {AITUNNEL_KEYS_URL}\n"
+    "/image model set <model>\n/image status\n/trust list\n/owner list\n/doctor\n/restart\n\n"
+    "Для AI настройте модель, endpoint и ключ. Быстрая настройка AI Tunnel: "
+    "/setaitunnel, затем /model set <model> и /token set <token>.\n"
+    f"AI Tunnel: {AITUNNEL_REFERRAL_URL}"
+)
 
 
 @dataclass(frozen=True)
@@ -85,7 +97,7 @@ class CommandRouter:
             if body.casefold() == "restart":
                 return CommandResult(False)
             command = body.split(None, 1)[0].casefold() if body else ""
-            if command in {"help", "status", "config", "model", "endpoint", "token", "trust", "owner", "doctor"}:
+            if command in {"help", "status", "config", "model", "setaitunnel", "endpoint", "token", "image", "trust", "owner", "doctor"}:
                 return self._command(f"/{body}", config)
             return CommandResult(False)
         return self._command(body, config)
@@ -143,7 +155,7 @@ class CommandRouter:
         value = parts[2].strip() if len(parts) > 2 else ""
         try:
             if command == "/help":
-                return CommandResult(True, "/status\n/config\n/model set <model>\n/endpoint set <url>\n/token set <token>\n/trust list\n/owner list\n/doctor\n/restart\n\nConfigure AI: set model, endpoint, and token.")
+                return CommandResult(True, _HELP_TEXT)
             if command in {"/status", "/config"}:
                 model = config.model or "не задана"
                 endpoint = config.endpoint or "не задан"
@@ -175,11 +187,29 @@ class CommandRouter:
                 updated = self.state.mutate(lambda current: current.with_changes(endpoint=endpoint))
                 self._apply_runtime(updated)
                 return CommandResult(True, "Endpoint обновлён.")
+            if command == "/setaitunnel" and not subcommand:
+                updated = self.state.mutate(
+                    lambda current: current.with_changes(endpoint=AITUNNEL_API_BASE_URL)
+                )
+                self._apply_runtime(updated)
+                return CommandResult(True, "Endpoint AI Tunnel установлен.")
             if command == "/token" and subcommand == "set":
                 self._bounded(value, MAX_INPUT_LENGTH)
                 updated = self.state.set_token(value)
                 self._apply_runtime(updated, value)
                 return CommandResult(True, f"Токен сохранён: {updated.token_mask}")
+            if command == "/token" and not subcommand:
+                return CommandResult(True, f"Используйте /token set <token>. Ключ: {AITUNNEL_KEYS_URL}")
+            if command == "/image" and subcommand == "model":
+                action, _, model = value.partition(" ")
+                if action.casefold() != "set":
+                    raise ValueError("invalid image command")
+                model = model.strip()
+                self._bounded(model, MAX_MODEL_LENGTH)
+                self._require_runtime().set_image_model(model)
+                return CommandResult(True, "Модель изображений обновлена.")
+            if command == "/image" and subcommand == "status" and not value:
+                return CommandResult(True, self._require_runtime().image_status())
             if command == "/doctor":
                 return CommandResult(True, self._run_doctor())
             if command == "/restart":
@@ -200,6 +230,11 @@ class CommandRouter:
             getter = getattr(self.state, "token", None)
             token = getter() if callable(getter) else None
         self._runtime.apply(config, token)
+
+    def _require_runtime(self):
+        if self._runtime is None:
+            raise RuntimeConfigError("Hermes runtime is unavailable")
+        return self._runtime
 
     def _run_doctor(self) -> str:
         if self._doctor is None:

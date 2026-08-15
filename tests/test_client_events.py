@@ -326,6 +326,17 @@ def test_outbound_splits_at_paragraph_or_whitespace_and_returns_stanza_ids(tmp_p
     assert all(stanza["to"] == "admin@example.com" and stanza["type"] == "chat" for stanza in sent)
 
 
+def test_media_url_is_sent_as_xmpp_oob_message(tmp_path):
+    client = make_client(tmp_path)
+    sent = capture_outbound(client)
+
+    ids = asyncio.run(client.send_media("admin@example.com", "https://files.example.test/image.png", "ready"))
+
+    assert ids == [sent[0]["id"]]
+    assert sent[0]["body"] == "ready\nhttps://files.example.test/image.png"
+    assert sent[0]["oob"]["url"] == "https://files.example.test/image.png"
+
+
 def test_outbound_splits_single_long_unicode_word_and_marks_group_messages(tmp_path):
     client = make_client(tmp_path)
     sent = capture_outbound(client)

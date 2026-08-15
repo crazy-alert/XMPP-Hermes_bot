@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import time
 from typing import Callable
+from urllib.parse import urlsplit
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
@@ -31,7 +32,13 @@ except ImportError:  # Direct module import used by focused adapter tests.
 
 logger = logging.getLogger(__name__)
 _CAPACITY = 4096
-_WELCOME_TEXT = "Welcome!\n/status\n/config\n/model set <model>\n/endpoint set <url>\n/token set <token>\n/trust list\n/owner list\n/doctor\n/restart\n\nConfigure AI: set model, endpoint, and token."
+_WELCOME_TEXT = (
+    "Добро пожаловать!\n/status\n/config\n/model set <model>\n/setaitunnel\n"
+    "/endpoint set <url>\n/token set <token> — ключ: https://aitunnel.ru/panel/keys\n"
+    "/image model set <model>\n/image status\n/trust list\n/owner list\n/doctor\n/restart\n\n"
+    "Для AI настройте модель, endpoint и ключ. AI Tunnel: /setaitunnel, затем модель и ключ.\n"
+    "AI Tunnel: https://aitunnel.ru?r=43877"
+)
 
 
 class _BootstrapAlreadyChanged(Exception):
@@ -177,6 +184,23 @@ class XmppPlatformAdapter(BasePlatformAdapter):
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         target = normalize_bare_jid(str(chat_id))
         is_group = target in self.room_state.load()
+        media = _extract_media_directive(content)
+        if media is not None:
+            source, caption = media
+            if not is_group and self._omemo_recipients.contains(target):
+                return SendResult(
+                    success=False,
+                    error="Нельзя безопасно отправить XMPP-медиа в диалоге с OMEMO",
+                )
+            try:
+                ids = await self.client.send_media(target, source, caption, is_group=is_group)
+            except Exception as exc:
+                return SendResult(success=False, error=exc.__class__.__name__)
+            if not ids:
+                return SendResult(success=False, error="XMPP media send returned no stanza ID")
+            for message_id in ids:
+                self._outbound.add((target, message_id))
+            return SendResult(success=True, message_id=ids[-1], continuation_message_ids=tuple(ids[:-1]))
         try:
             ids = await (self.client.send_group(target, content) if is_group
                          else self.client.send_direct_omemo(target, content) if self._omemo_recipients.contains(target)
@@ -247,9 +271,9 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         event_chat = chat if message.is_group else sender
         if not (snapshot.model and snapshot.endpoint and snapshot.token_present):
             reply = (
-                "AI is not configured. Use /model set <model>, /endpoint set <url>, and /token set <token>."
+                "AI не настроен. Используйте /setaitunnel или /endpoint set <url>, затем /model set <model> и /token set <token>."
                 if sender in snapshot.owners
-                else "AI is not configured. Please contact the bot owner."
+                else "AI не настроен. Обратитесь к владельцу бота."
             )
             await self.send(event_chat, reply)
             return
@@ -313,7 +337,45 @@ class XmppPlatformAdapter(BasePlatformAdapter):
             logger.error("XMPP room join failed for %s: %s", room, exc.__class__.__name__)
 
 
+def _extract_media_directive(content: object) -> tuple[str, str | None] | None:
+    """Return one strict public-media directive emitted by Hermes, if present."""
+    if not isinstance(content, str):
+        return None
+    lines = content.splitlines()
+    matches = [(index, line[6:]) for index, line in enumerate(lines) if line.startswith("MEDIA:")]
+    if len(matches) != 1:
+        return None
+    index, source = matches[0]
+    parsed = urlsplit(source)
+    if parsed.scheme == "https":
+        if (
+            not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or any(ord(character) < 32 for character in source)
+        ):
+            return None
+    else:
+        try:
+            home = Path(os.environ["HERMES_HOME"]).resolve(strict=True)
+            local_file = Path(source).resolve(strict=True)
+            local_file.relative_to(home)
+            if not local_file.is_file():
+                return None
+            source = str(local_file)
+        except (KeyError, OSError, ValueError):
+            return None
+    caption = "\n".join(lines[:index] + lines[index + 1:]).strip() or None
+    return source, caption
+
+
 def register(ctx):
+    try:
+        from .xmpp_image_gen import XmppImageGenProvider
+    except ImportError:
+        from xmpp_image_gen import XmppImageGenProvider
+
+    ctx.register_image_gen_provider(XmppImageGenProvider())
     ctx.register_platform(name="xmpp", label="XMPP", adapter_factory=lambda cfg: XmppPlatformAdapter(cfg),
                           check_fn=check_requirements, validate_config=validate_config,
                           required_env=["XMPP_JID", "XMPP_PASSWORD", "XMPP_ALLOWED_USERS"],

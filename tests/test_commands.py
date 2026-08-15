@@ -27,6 +27,7 @@ class Config:
 class State:
     def __init__(self): self.config = Config(); self.secret = None
     def load(self): return self.config
+    def token(self): return self.secret
     def mutate(self, fn): self.config = replace(fn(self.config), revision=self.config.revision + 1); return self.config
     def set_token(self, token): self.secret = token; self.config = replace(self.config, token_present=True, token_mask="***" + token[-4:], revision=self.config.revision + 1); return self.config
 
@@ -86,6 +87,45 @@ def test_endpoint_command_rejects_a_concrete_api_method():
     result = CommandRouter(state).handle(message(body="/endpoint set https://llm.example/v1/chat/completions"))
     assert result.handled is True
     assert state.config.endpoint is None
+
+
+def test_owner_can_select_image_model_through_runtime():
+    class Runtime:
+        def __init__(self): self.model = None
+        def set_image_model(self, model): self.model = model
+        def image_status(self): return "Модель изображений: " + self.model
+
+    runtime = Runtime()
+    router = CommandRouter(State(), runtime=runtime)
+
+    assert router.handle(message(body="/image model set image-model")).handled is True
+    assert runtime.model == "image-model"
+    assert router.handle(message(body="/image status")).reply == "Модель изображений: image-model"
+
+
+def test_setaitunnel_uses_the_service_api_base_url():
+    class Runtime:
+        def __init__(self): self.calls = []
+        def apply(self, config, token): self.calls.append((config, token))
+
+    state, runtime = State(), Runtime()
+    router = CommandRouter(state, runtime=runtime)
+    router.handle(message(body="/model set model-x"))
+    router.handle(message(body="/token set very-secret-token"))
+    result = router.handle(message(body="/setaitunnel"))
+    assert result.handled is True
+    assert state.config.endpoint == "https://api.aitunnel.ru/v1"
+    applied, token = runtime.calls[-1]
+    assert (applied.model, applied.endpoint, token) == (
+        "model-x", "https://api.aitunnel.ru/v1", "very-secret-token"
+    )
+
+
+def test_help_explains_aitunnel_setup_and_token_key_page():
+    reply = CommandRouter(State()).handle(message(body="/help")).reply
+    assert "/setaitunnel" in reply
+    assert "https://aitunnel.ru/panel/keys" in reply
+    assert "https://aitunnel.ru?r=43877" in reply
 
 
 def test_owner_only_and_muc_never_administers():

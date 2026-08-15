@@ -497,6 +497,13 @@ def test_installer_installs_the_pinned_omemo_transport_dependency() -> None:
     assert '"slixmpp-omemo==2.2.0"' in installer
 
 
+def test_installer_includes_the_xmpp_image_provider_and_upload_dependency() -> None:
+    installer = read_asset("deploy/install-on-ubuntu.sh")
+
+    assert '"aiohttp>=' in installer
+    assert 'xmpp_image_gen' in installer
+
+
 def test_env_template_and_unit_contract() -> None:
     values = {}
     comments = []
@@ -1024,9 +1031,10 @@ def test_plugin_copy_is_explicit_allowlist(tmp_path: Path) -> None:
         assert result.returncode == 0, result.stderr
         dest = root / "var/lib/hermes/.hermes/plugins/xmpp-platform"
         assert sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()) == [
-            "adapter.py", "plugin.yaml", "xmpp_bridge/__init__.py", "xmpp_bridge/admin_state.py", "xmpp_bridge/client.py",
-            "xmpp_bridge/commands.py", "xmpp_bridge/models.py", "xmpp_bridge/policy.py", "xmpp_bridge/reboot.py",
-            "xmpp_bridge/state.py", "xmpp_bridge/updates.py",
+            "__init__.py", "adapter.py", "plugin.yaml", "xmpp_bridge/__init__.py", "xmpp_bridge/admin_state.py",
+            "xmpp_bridge/client.py", "xmpp_bridge/commands.py", "xmpp_bridge/hermes_config.py",
+            "xmpp_bridge/models.py", "xmpp_bridge/omemo.py", "xmpp_bridge/policy.py", "xmpp_bridge/reboot.py",
+            "xmpp_bridge/state.py", "xmpp_bridge/updates.py", "xmpp_image_gen/__init__.py",
         ]
     finally:
         shutil.rmtree(junk)

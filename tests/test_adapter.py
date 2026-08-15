@@ -181,6 +181,10 @@ class FakeClient:
         self.calls.append(("send_group", jid, body))
         return list(self.group_ids)
 
+    async def send_media(self, jid, source, caption=None, *, is_group=False):
+        self.calls.append(("send_media", jid, source, caption, is_group))
+        return list(self.group_ids if is_group else self.direct_ids)
+
     async def set_typing(self, jid, is_group, active):
         self.calls.append(("typing", jid, is_group, active))
 
@@ -282,6 +286,71 @@ def test_contract_send_selects_dm_or_muc_and_returns_all_stanza_ids():
     )
 
 
+def test_media_directive_sends_a_public_image_as_xmpp_oob():
+    adapter = make_adapter()
+    client = FakeClient.instances[-1]
+
+    result = run(adapter.send(ADMIN, "Готово.\nMEDIA:https://files.example.test/image.png"))
+
+    assert client.calls == [
+        ("send_media", ADMIN, "https://files.example.test/image.png", "Готово.", False),
+    ]
+    assert result == SendResult(success=True, message_id="direct-1")
+
+
+def test_media_directive_never_downgrades_an_omemo_dialogue():
+    adapter = make_adapter()
+    adapter._omemo_recipients.add(ADMIN)
+    client = FakeClient.instances[-1]
+
+    result = run(adapter.send(ADMIN, "MEDIA:https://files.example.test/image.png"))
+
+    assert client.calls == []
+    assert result.success is False
+    assert result.error == "Нельзя безопасно отправить XMPP-медиа в диалоге с OMEMO"
+
+
+def test_media_directive_accepts_only_a_local_file_inside_hermes_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    image = tmp_path / "generated" / "image.png"
+    image.parent.mkdir()
+    image.write_bytes(b"png")
+
+    assert adapter_module._extract_media_directive(f"MEDIA:{image}") == (str(image), None)
+    assert adapter_module._extract_media_directive("MEDIA:/tmp/not-hermes.png") is None
+
+
+def test_platform_registers_the_xmpp_image_provider():
+    agent = types.ModuleType("agent")
+    image_gen = types.ModuleType("agent.image_gen_provider")
+    image_gen.ImageGenProvider = object
+    image_gen.DEFAULT_ASPECT_RATIO = "landscape"
+    image_gen.error_response = lambda **payload: payload
+    image_gen.resolve_aspect_ratio = lambda ratio: ratio
+    image_gen.save_b64_image = lambda *_args, **_kwargs: Path("image.png")
+    image_gen.success_response = lambda **payload: payload
+    previous_agent = sys.modules.get("agent")
+    previous_image_gen = sys.modules.get("agent.image_gen_provider")
+    sys.modules.update({"agent": agent, "agent.image_gen_provider": image_gen})
+
+    class Context:
+        def __init__(self): self.providers = []
+        def register_platform(self, **_kwargs): pass
+        def register_image_gen_provider(self, provider): self.providers.append(provider)
+
+    context = Context()
+    try:
+        adapter_module.register(context)
+    finally:
+        if previous_agent is None: sys.modules.pop("agent", None)
+        else: sys.modules["agent"] = previous_agent
+        if previous_image_gen is None: sys.modules.pop("agent.image_gen_provider", None)
+        else: sys.modules["agent.image_gen_provider"] = previous_image_gen
+
+    assert len(context.providers) == 1
+    assert context.providers[0].name == "xmpp-ai"
+
+
 def test_encrypted_dm_marks_recipient_so_the_following_response_is_encrypted():
     adapter = make_adapter()
     client = FakeClient.instances[-1]
@@ -321,7 +390,7 @@ def test_authorized_messages_receive_configuration_error_instead_of_being_droppe
     assert client.calls[0][:2] == ("send_direct", ADMIN)
     assert "/model set" in client.calls[0][2]
     assert client.calls[1][:2] == ("send_direct", "trusted@example.com")
-    assert "not configured" in client.calls[1][2]
+    assert "не настроен" in client.calls[1][2]
 
 
 def test_dm_command_reply_bypasses_failing_hermes_and_calls_supervisor_after_send():
@@ -552,11 +621,16 @@ def test_config_rejects_port_without_direct_host(monkeypatch):
 
 def test_register_uses_official_platform_contract(monkeypatch):
     calls = []
-    ctx = types.SimpleNamespace(register_platform=lambda **kwargs: calls.append(kwargs))
+    providers = []
+    ctx = types.SimpleNamespace(
+        register_platform=lambda **kwargs: calls.append(kwargs),
+        register_image_gen_provider=lambda provider: providers.append(provider),
+    )
 
     adapter_module.register(ctx)
 
     assert len(calls) == 1
+    assert [provider.name for provider in providers] == ["xmpp-ai"]
     registered = calls[0]
     assert {
         "name": registered["name"],

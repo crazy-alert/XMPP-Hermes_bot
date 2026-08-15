@@ -61,7 +61,7 @@ HERMES_COMMIT=3c27eb6234bf91b8ceee9e9071591b31e9b148cb
 INSTALLER_SHA256=45f589461248c7a6ec3aecd7522a69dd49c5c8dbf4798ba1296af5c0c5e7ccd3
 OFFICIAL_INSTALLER_URL=https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_COMMIT/scripts/install.sh
 
-if [ ! -f "$PLUGIN_SOURCE/__init__.py" ] || [ ! -f "$PLUGIN_SOURCE/adapter.py" ] || [ ! -f "$PLUGIN_SOURCE/plugin.yaml" ] || [ ! -d "$PLUGIN_SOURCE/xmpp_bridge" ]; then
+if [ ! -f "$PLUGIN_SOURCE/__init__.py" ] || [ ! -f "$PLUGIN_SOURCE/adapter.py" ] || [ ! -f "$PLUGIN_SOURCE/plugin.yaml" ] || [ ! -d "$PLUGIN_SOURCE/xmpp_bridge" ] || [ ! -f "$PLUGIN_SOURCE/xmpp_image_gen/__init__.py" ]; then
     printf 'Ошибка: неполный источник плагина: %s\n' "$PLUGIN_SOURCE" >&2
     exit 1
 fi
@@ -359,13 +359,15 @@ fi
 printf '%s\n' 'Installing XMPP Python dependencies...' >&2
 runuser -u hermes -- env HOME="$HERMES_ACCOUNT_HOME_DISK" HERMES_HOME="$HERMES_HOME_DISK" \
     UV_HTTP_TIMEOUT=30 UV_HTTP_RETRIES=2 \
-    bash -c 'cd "$1" && exec "$2" pip install --python "$3" "slixmpp>=1.12,<2" "slixmpp-omemo==2.2.0" pytest' \
+    bash -c 'cd "$1" && exec "$2" pip install --python "$3" "slixmpp>=1.12,<2" "slixmpp-omemo==2.2.0" "aiohttp>=3.9,<4" pytest' \
     bash "$HERMES_ACCOUNT_HOME_DISK" "$UV_BIN_DISK" "$HERMES_PYTHON_DISK"
 
 # Stage the complete allowlisted plugin before stopping the service.
 cp -- "$PLUGIN_SOURCE/__init__.py" "$PLUGIN_SOURCE/adapter.py" "$PLUGIN_SOURCE/plugin.yaml" "$PLUGIN_SOURCE_STAGE/"
 mkdir -p -- "$PLUGIN_SOURCE_STAGE/xmpp_bridge"
 while IFS= read -r source_file; do cp -- "$source_file" "$PLUGIN_SOURCE_STAGE/xmpp_bridge/"; done < <(find "$PLUGIN_SOURCE/xmpp_bridge" -maxdepth 1 -type f -name '*.py' -print)
+mkdir -p -- "$PLUGIN_SOURCE_STAGE/xmpp_image_gen"
+cp -- "$PLUGIN_SOURCE/xmpp_image_gen/__init__.py" "$PLUGIN_SOURCE_STAGE/xmpp_image_gen/"
 chown -R hermes:hermes "$PLUGIN_SOURCE_STAGE"
 chmod -R go-rwx "$PLUGIN_SOURCE_STAGE"
 runuser -u hermes -- sh -c '
@@ -375,6 +377,9 @@ runuser -u hermes -- sh -c '
         test -f "$source_file" && test ! -L "$source_file" || exit 1
         cp -- "$source_file" "$2/xmpp_bridge/"
     done
+    mkdir -p -- "$2/xmpp_image_gen"
+    test -f "$1/xmpp_image_gen/__init__.py" && test ! -L "$1/xmpp_image_gen/__init__.py" || exit 1
+    cp -- "$1/xmpp_image_gen/__init__.py" "$2/xmpp_image_gen/"
     test -f "$2/xmpp_bridge/__init__.py" && test ! -L "$2/xmpp_bridge/__init__.py" || exit 1
     chmod -R go-rwx "$2"
 ' sh "$PLUGIN_SOURCE_STAGE" "$PLUGIN_STAGE" || { printf '%s\n' 'Ошибка: не удалось подготовить плагин XMPP.' >&2; exit 1; }

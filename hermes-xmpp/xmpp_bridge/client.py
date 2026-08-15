@@ -89,7 +89,7 @@ class HermesXmppClient(ClientXMPP):
         self.enable_direct_tls = config.direct_tls
         self.enable_starttls = not config.direct_tls
         self._configure_tls()
-        for plugin in ("xep_0030", "xep_0045", "xep_0085", "xep_0184", "xep_0198", "xep_0249", "xep_0333", "xep_0461"):
+        for plugin in ("xep_0030", "xep_0045", "xep_0066", "xep_0085", "xep_0184", "xep_0198", "xep_0249", "xep_0333", "xep_0461"):
             self.register_plugin(plugin)
         self.plugin["xep_0184"].auto_ack = False
 
@@ -196,6 +196,32 @@ class HermesXmppClient(ClientXMPP):
 
     async def send_group(self, room_jid: str, body: str) -> list[str]:
         return self._send_chunks(normalize_bare_jid(room_jid), body, "groupchat")
+
+    async def send_media(
+        self,
+        jid: str,
+        source: str,
+        caption: str | None = None,
+        *,
+        is_group: bool = False,
+    ) -> list[str]:
+        recipient = normalize_bare_jid(jid)
+        if not isinstance(source, str) or not source:
+            return []
+        if source.startswith("https://"):
+            url = source
+        else:
+            self.register_plugin("xep_0363")
+            url = await self.plugin["xep_0363"].upload_file(Path(source))
+        stanza = self.make_message(
+            recipient,
+            mbody="\n".join(part for part in (caption, url) if part),
+            mtype="groupchat" if is_group else "chat",
+        )
+        stanza["id"] = self.new_id()
+        stanza["oob"]["url"] = url
+        self.send(stanza)
+        return [stanza["id"]]
 
     async def set_typing(self, jid: str, is_group: bool, active: bool) -> None:
         message_type = "groupchat" if is_group else "chat"
