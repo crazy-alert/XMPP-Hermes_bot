@@ -32,8 +32,9 @@ except ImportError:  # Direct module import used by focused adapter tests.
 
 logger = logging.getLogger(__name__)
 _CAPACITY = 4096
+_WELCOME_VERSION = "3"
 _WELCOME_TEXT = (
-    "Добро пожаловать!\n/status\n/config\n/model set <model>\n/setaitunnel\n"
+    "Добро пожаловать!\n/help — список команд с пояснениями\n/status\n/config\n/model set <model>\n/setaitunnel\n"
     "/endpoint set <url>\n/token set <token> — ключ: https://aitunnel.ru/panel/keys\n"
     "/image model set <model>\n/image status\n/trust list\n/owner list\n/doctor\n/restart\n\n"
     "Для AI настройте модель, endpoint и ключ. AI Tunnel: /setaitunnel, затем модель и ключ.\n"
@@ -160,7 +161,12 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         return True
 
     async def _send_first_owner_welcome(self):
-        if self._welcome_marker.exists():
+        try:
+            if self._welcome_marker.read_text(encoding="utf-8") == _WELCOME_VERSION + "\n":
+                return
+        except FileNotFoundError:
+            pass
+        except OSError:
             return
         try:
             owner = sorted(self._snapshot().owners)[0]
@@ -170,10 +176,7 @@ class XmppPlatformAdapter(BasePlatformAdapter):
             return
         try:
             self._welcome_marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with self._welcome_marker.open("x", encoding="utf-8") as marker:
-                marker.write("1\n")
-        except FileExistsError:
-            return
+            self._welcome_marker.write_text(_WELCOME_VERSION + "\n", encoding="utf-8")
         except OSError:
             logger.warning("Could not persist XMPP welcome marker")
 

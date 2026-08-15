@@ -126,6 +126,10 @@ def test_help_explains_aitunnel_setup_and_token_key_page():
     assert "/setaitunnel" in reply
     assert "https://aitunnel.ru/panel/keys" in reply
     assert "https://aitunnel.ru?r=43877" in reply
+    assert "установить endpoint AI Tunnel" in reply
+    assert "выбрать текстовую модель" in reply
+    assert "сохранить API-ключ" in reply
+    assert "модель изображений" in reply
 
 
 def test_owner_only_and_muc_never_administers():
@@ -265,7 +269,7 @@ def test_owner_service_commands_accept_a_missing_slash_except_restart():
 
     assert "model=" in router.handle(message(body="status")).reply
     assert router.handle(message(body="config")).handled is True
-    assert "/status\n/config" in router.handle(message(body="help")).reply
+    assert "/status, /config" in router.handle(message(body="help")).reply
     assert router.handle(message(body="restart")).handled is False
 
 

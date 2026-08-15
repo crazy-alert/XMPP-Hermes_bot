@@ -266,6 +266,19 @@ def test_contract_connect_disconnect_marks_and_uses_verified_client_config():
     assert client.config.room_state.path == Path(os.environ["HERMES_HOME"]) / "xmpp" / "rooms.json"
 
 
+def test_connect_refreshes_an_outdated_welcome_menu():
+    adapter = make_adapter()
+    adapter._welcome_marker.parent.mkdir(parents=True)
+    adapter._welcome_marker.write_text("1\n", encoding="utf-8")
+    client = FakeClient.instances[-1]
+
+    run(adapter.connect())
+
+    assert client.calls == [("connect",), ("send_direct", ADMIN, adapter_module._WELCOME_TEXT)]
+    assert "/help — список команд с пояснениями" in adapter_module._WELCOME_TEXT
+    assert adapter._welcome_marker.read_text(encoding="utf-8") == adapter_module._WELCOME_VERSION + "\n"
+
+
 def test_contract_send_selects_dm_or_muc_and_returns_all_stanza_ids():
     adapter = make_adapter()
     client = FakeClient.instances[-1]
