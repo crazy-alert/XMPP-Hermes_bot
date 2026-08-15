@@ -50,7 +50,7 @@ def test_provider_posts_to_images_generations_and_saves_base64(tmp_path, monkeyp
 
     def request(url, payload, token):
         seen.update(url=url, payload=payload, token=token)
-        return {"data": [{"b64_json": base64.b64encode(b"png").decode("ascii")]}
+        return {"data": [{"b64_json": base64.b64encode(b"png").decode("ascii")}]}
 
     provider = module.XmppImageGenProvider(
         config_loader=lambda: {
