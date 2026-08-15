@@ -131,6 +131,7 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         jid, password, self.allowed_users, self.nick, host, port, state_path = _settings()
         self.bot_jid = normalize_bare_jid(jid)
         self.room_state = RoomState(state_path)
+        self._ready_path = Path(os.getenv("XMPP_READY_PATH", "").strip() or state_path.with_name("connected"))
         self._welcome_marker = state_path.with_name("welcome.sent")
         admin_path = Path(os.getenv("XMPP_ADMIN_STATE_PATH", "").strip() or state_path.with_name("admin.json"))
         self._seed_admin_state = admin_state is None and not admin_path.exists()
@@ -155,6 +156,8 @@ class XmppPlatformAdapter(BasePlatformAdapter):
 
     async def connect(self, *, is_reconnect=False):
         await self.client.connect_and_wait()
+        self._ready_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._ready_path.write_text("ready\n", encoding="ascii")
         self._mark_connected()
         if not is_reconnect:
             await self._send_first_owner_welcome()
@@ -181,6 +184,7 @@ class XmppPlatformAdapter(BasePlatformAdapter):
             logger.warning("Could not persist XMPP welcome marker")
 
     async def disconnect(self):
+        self._ready_path.unlink(missing_ok=True)
         await self.client.disconnect()
         self._mark_disconnected()
 

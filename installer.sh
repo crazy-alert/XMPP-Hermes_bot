@@ -351,10 +351,19 @@ printf '%s' 'Запустить и включить службу Hermes сейч
 read_line answer || answer=''
 case "${answer%$'\r'}" in
     y|Y|yes|YES|Yes|д|Д|да|Да|ДА)
+        XMPP_READY_FILE=/var/lib/hermes/.hermes/xmpp/connected
+        wait_for_xmpp_ready() {
+            for _ in $(seq 1 30); do
+                [ -f "$XMPP_READY_FILE" ] && [ ! -L "$XMPP_READY_FILE" ] && return 0
+                systemctl is-active --quiet hermes-gateway || return 1
+                sleep 1
+            done
+            return 1
+        }
         started=0
         for attempt in 1 2 3; do
             if systemctl enable --now hermes-gateway \
-                && systemctl is-active --quiet hermes-gateway; then
+                && wait_for_xmpp_ready; then
                 started=1
                 break
             fi
@@ -362,7 +371,15 @@ case "${answer%$'\r'}" in
             journalctl -u hermes-gateway --no-pager -n 30 >&2 || true
             [ "$attempt" -lt 3 ] || break
             printf '%s' 'JID или пароль могут быть неверными. Ввести полный JID и пароль ещё раз? [y/N] ' >&2
+            printf '%s' 'Что изменить: 1) сервер 2) порт 3) JID 4) пароль 5) всё 0) отмена: ' >&2
             read_line retry || retry=''
+            case "${retry%$'\r'}" in
+                1) read_value 'Сервер XMPP: ' HOST; validate_host "$HOST" || continue; write_xmpp_env; rm -f -- "$XMPP_READY_FILE"; systemctl restart hermes-gateway || true; continue ;;
+                2) read_value 'Порт XMPP: ' PORT; validate_port "$PORT" || continue; write_xmpp_env; rm -f -- "$XMPP_READY_FILE"; systemctl restart hermes-gateway || true; continue ;;
+                3) read_value 'Полный JID бота с ресурсом: ' JID; validate_full_jid "$JID" || continue; NICK=${JID#*/}; write_xmpp_env; rm -f -- "$XMPP_READY_FILE"; systemctl restart hermes-gateway || true; continue ;;
+                4) printf '%s' 'Пароль XMPP: ' >&2; read_secret PASSWORD || PASSWORD=''; PASSWORD=${PASSWORD%$'\r'}; printf '\n' >&2; validate_password "$PASSWORD" || continue; write_xmpp_env; rm -f -- "$XMPP_READY_FILE"; systemctl restart hermes-gateway || true; continue ;;
+                0) break ;;
+            esac
             case "${retry%$'\r'}" in y|Y|yes|YES|Yes|РґР°|Рґ) ;; *) break ;; esac
             read_value 'Bot full JID with resource: ' JID
             validate_full_jid "$JID" || { printf '%s\n' 'Некорректный JID.' >&2; continue; }

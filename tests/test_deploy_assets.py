@@ -1326,10 +1326,19 @@ def test_bootstrap_has_a_pinned_default_release_for_one_line_install() -> None:
 
 def test_bootstrap_retries_jid_and_password_after_failed_service_start() -> None:
     script = read_asset("installer.sh")
-    assert "JID или пароль могут быть неверными" in script
-    assert "Bot full JID with resource: " in script
-    assert "XMPP password: " in script
+    assert "Что изменить: 1) сервер 2) порт 3) JID 4) пароль 5) всё" in script
+    assert 'wait_for_xmpp_ready' in script
+    assert 'XMPP_READY_FILE=/var/lib/hermes/.hermes/xmpp/connected' in script
     assert "write_xmpp_env" in script
+
+
+def test_gateway_readiness_is_created_only_after_xmpp_session_start() -> None:
+    adapter = read_asset("hermes-xmpp/adapter.py")
+    unit = read_asset("deploy/hermes-gateway.service")
+
+    assert "self._ready_path.write_text" in adapter
+    assert adapter.index("await self.client.connect_and_wait()") < adapter.index("self._ready_path.write_text")
+    assert "ExecStartPre=/usr/bin/rm -f /var/lib/hermes/.hermes/xmpp/connected" in unit
 
 
 def test_bootstrap_reads_pipeline_prompts_from_terminal() -> None:

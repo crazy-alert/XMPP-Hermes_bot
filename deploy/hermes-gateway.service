@@ -11,6 +11,7 @@ Group=hermes
 SupplementaryGroups=docker
 WorkingDirectory=/var/lib/hermes
 EnvironmentFile=/etc/hermes/hermes.env
+ExecStartPre=/usr/bin/rm -f /var/lib/hermes/.hermes/xmpp/connected
 ExecStart=/var/lib/hermes/.local/bin/hermes gateway run
 Restart=on-failure
 RestartSec=5
