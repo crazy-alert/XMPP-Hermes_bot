@@ -70,6 +70,7 @@ class HermesXmppClient(ClientXMPP):
         # Slixmpp selects direct TLS through stream flags, not connect kwargs.
         self.enable_direct_tls = config.direct_tls
         self.enable_starttls = not config.direct_tls
+        self._configure_tls()
         for plugin in ("xep_0030", "xep_0045", "xep_0085", "xep_0198", "xep_0249", "xep_0461"):
             self.register_plugin(plugin)
 
@@ -286,6 +287,10 @@ class HermesXmppClient(ClientXMPP):
 
     def _connect_kwargs(self) -> dict[str, bool]:
         return {}
+
+    def _configure_tls(self) -> None:
+        if self.config.direct_tls:
+            self.ssl_context.set_alpn_protocols(["xmpp-client"])
 
     def _send_chunks(self, recipient: str, body: str, message_type: str) -> list[str]:
         if not isinstance(body, str) or not body:

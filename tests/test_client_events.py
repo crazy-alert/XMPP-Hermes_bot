@@ -197,6 +197,35 @@ def test_direct_tls_uses_slixmpp_stream_flags_instead_of_connect_keyword(tmp_pat
     assert client._connect_kwargs() == {}
 
 
+def test_direct_tls_advertises_xmpp_client_alpn_for_caddy(tmp_path):
+    client = HermesXmppClient(
+        XmppClientConfig(
+            BOT_JID,
+            "not-a-real-password",
+            "Hermes",
+            RoomState(tmp_path / "rooms.json"),
+            "xmpp.example.test",
+            443,
+            True,
+        ),
+        lambda event: None,
+        lambda event: None,
+    )
+
+    class Context:
+        protocols = None
+
+        def set_alpn_protocols(self, protocols):
+            self.protocols = protocols
+
+    context = Context()
+    client.ssl_context = context
+
+    client._configure_tls()
+
+    assert context.protocols == ["xmpp-client"]
+
+
 def capture_outbound(client):
     sent = []
     client.send = sent.append
