@@ -77,12 +77,22 @@ class CommandRouter:
         if len(body) > MAX_BODY_LENGTH:
             return CommandResult(True, "Команда слишком длинная.")
         if not body.startswith("/"):
-            return self._start_toggle(sender, body, config)
+            toggle = self._start_toggle(sender, body, config)
+            if toggle.handled:
+                return toggle
+            if body.casefold() == "restart":
+                return CommandResult(False)
+            command = body.split(None, 1)[0].casefold() if body else ""
+            if command in {"help", "status", "config", "model", "endpoint", "token", "trust", "owner", "doctor"}:
+                return self._command(f"/{body}", config)
+            return CommandResult(False)
         return self._command(body, config)
 
     @staticmethod
     def _exact_bare_jid(text: str) -> str:
         """Accept a complete canonical bare JID, never a resource or sentence."""
+        if isinstance(text, str) and text.casefold().startswith("xmpp:"):
+            text = text[5:]
         if not isinstance(text, str) or not text or len(text) > MAX_JID_LENGTH:
             raise ValueError("invalid JID")
         if "/" in text or any(char.isspace() or ord(char) < 32 for char in text):
@@ -131,7 +141,7 @@ class CommandRouter:
         value = parts[2].strip() if len(parts) > 2 else ""
         try:
             if command == "/help":
-                return CommandResult(True, "/status /config /model set /endpoint set /token set /trust list /owner list /doctor /restart")
+                return CommandResult(True, "/status\n/config\n/model set <model>\n/endpoint set <url>\n/token set <token>\n/trust list\n/owner list\n/doctor\n/restart\n\nConfigure AI: set model, endpoint, and token.")
             if command in {"/status", "/config"}:
                 model = config.model or "не задана"
                 endpoint = config.endpoint or "не задан"

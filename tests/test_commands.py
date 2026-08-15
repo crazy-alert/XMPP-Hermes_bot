@@ -193,3 +193,21 @@ def test_lists_status_help_unknown_and_doctor_callback_are_safe():
     assert router.handle(message(body="/doctor")).reply == "ok"
     assert "Неизвестная" in router.handle(message(body="/wat")).reply
     assert CommandRouter(state, doctor=lambda: (_ for _ in ()).throw(RuntimeError("secret"))).handle(message(body="/doctor")).reply == "Проверка недоступна."
+
+
+def test_owner_service_commands_accept_a_missing_slash_except_restart():
+    router = CommandRouter(State())
+
+    assert "model=" in router.handle(message(body="status")).reply
+    assert router.handle(message(body="config")).handled is True
+    assert "/status\n/config" in router.handle(message(body="help")).reply
+    assert router.handle(message(body="restart")).handled is False
+
+
+def test_owner_can_toggle_trust_with_an_xmpp_uri_jid():
+    state = State()
+    router = CommandRouter(state)
+
+    assert router.handle(message(body="xmpp:new@example.com")).handled is True
+    assert router.handle(message(body="yes")).handled is True
+    assert "new@example.com" in state.config.trusted_jids

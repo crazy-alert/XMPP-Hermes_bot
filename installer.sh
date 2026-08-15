@@ -332,7 +332,7 @@ STATE_TMP=$(runuser -u hermes -- mktemp "$STATE_DIR/.admin.json.XXXXXX")
 chmod 0600 "$ENV_TMP"
 printf 'HERMES_HOME=/var/lib/hermes/.hermes\nXMPP_JID=%s\nXMPP_ALLOWED_USERS=%s\nXMPP_NICK=%s\nXMPP_STATE_PATH=/var/lib/hermes/.hermes/xmpp/rooms.json\nXMPP_HOST=%s\nXMPP_PORT=%s\nXMPP_TLS_MODE=%s\nXMPP_ADMIN_STATE_PATH=/var/lib/hermes/.hermes/xmpp/admin.json\nXMPP_PASSWORD=%s\n' \
     "$(quote_env "$JID")" "$(quote_env "$OWNER")" "$(quote_env "$NICK")" "$(quote_env "$HOST")" "$PORT" "$TLS_MODE" "$(quote_env "$PASSWORD")" >"$ENV_TMP"
-runuser -u hermes -- sh -c 'umask 077; printf "{\\\"version\\\":1,\\\"revision\\\":0,\\\"owners\\\":[\\\"%s\\\"],\\\"trusted_jids\\\":[],\\\"model\\\":null,\\\"endpoint\\\":null,\\\"token\\\":null}\\n" "$2" >"$1"; sync -f "$1"' sh "$STATE_TMP" "$OWNER"
+runuser -u hermes -- sh -c 'umask 077; printf "{\"version\":1,\"revision\":0,\"owners\":[\"%s\"],\"trusted_jids\":[],\"model\":null,\"endpoint\":null,\"token\":null}\n" "$2" >"$1"; sync -f "$1"' sh "$STATE_TMP" "$OWNER"
 sync -f "$ENV_TMP"
 mv -f "$ENV_TMP" "$ENV_FILE"
 sync_dir "$ENV_DIR"

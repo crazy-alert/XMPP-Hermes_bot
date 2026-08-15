@@ -29,6 +29,7 @@ except ImportError:  # Direct module import used by focused adapter tests.
 
 logger = logging.getLogger(__name__)
 _CAPACITY = 4096
+_WELCOME_TEXT = "Welcome!\n/status\n/config\n/model set <model>\n/endpoint set <url>\n/token set <token>\n/trust list\n/owner list\n/doctor\n/restart\n\nConfigure AI: set model, endpoint, and token."
 
 
 class _BootstrapAlreadyChanged(Exception):
@@ -120,6 +121,7 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         jid, password, self.allowed_users, self.nick, host, port, state_path = _settings()
         self.bot_jid = normalize_bare_jid(jid)
         self.room_state = RoomState(state_path)
+        self._welcome_marker = state_path.with_name("welcome.sent")
         admin_path = Path(os.getenv("XMPP_ADMIN_STATE_PATH", "").strip() or state_path.with_name("admin.json"))
         self._seed_admin_state = admin_state is None and not admin_path.exists()
         first_owner = sorted(self.allowed_users)[0]
@@ -128,11 +130,12 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         self._supervisor = supervisor
         self._inbound = _TtlCache(600, cache_capacity, monotonic)
         self._outbound = _TtlCache(86400, cache_capacity, monotonic)
-        client_config = XmppClientConfig(jid, password, self.nick, self.room_state, host, port, host is not None)
+        self._omemo_recipients = _TtlCache(600, cache_capacity, monotonic)
+        client_config = XmppClientConfig(jid, password, self.nick, self.room_state, host, port, host is not None, omemo_enabled=True)
         self.client = client_factory(client_config, self._schedule_message, self._schedule_invite)
 
     def _schedule_message(self, message):
-        asyncio.get_running_loop().create_task(self._dispatch_message(message))
+        return asyncio.get_running_loop().create_task(self._dispatch_message(message))
 
     def _schedule_invite(self, invite):
         asyncio.get_running_loop().create_task(self._accept_invite(invite))
@@ -140,7 +143,27 @@ class XmppPlatformAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect=False):
         await self.client.connect_and_wait()
         self._mark_connected()
+        if not is_reconnect:
+            await self._send_first_owner_welcome()
         return True
+
+    async def _send_first_owner_welcome(self):
+        if self._welcome_marker.exists():
+            return
+        try:
+            owner = sorted(self._snapshot().owners)[0]
+        except (AdminStateError, ConfigValidationError, IndexError, OSError, ValueError):
+            return
+        if not (await self.send(owner, _WELCOME_TEXT)).success:
+            return
+        try:
+            self._welcome_marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with self._welcome_marker.open("x", encoding="utf-8") as marker:
+                marker.write("1\n")
+        except FileExistsError:
+            return
+        except OSError:
+            logger.warning("Could not persist XMPP welcome marker")
 
     async def disconnect(self):
         await self.client.disconnect()
@@ -151,6 +174,7 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         is_group = target in self.room_state.load()
         try:
             ids = await (self.client.send_group(target, content) if is_group
+                         else self.client.send_direct_omemo(target, content) if self._omemo_recipients.contains(target)
                          else self.client.send_direct(target, content))
         except Exception as exc:
             return SendResult(success=False, error=exc.__class__.__name__)
@@ -177,6 +201,11 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         key = (chat, message.message_id)
         if not message.message_id or self._inbound.contains(key):
             return
+        if message.encrypted and not message.is_group:
+            try:
+                self._omemo_recipients.add(normalize_bare_jid(message.sender_jid))
+            except ValueError:
+                return
         if not message.is_group:
             try:
                 self._snapshot()
@@ -220,7 +249,8 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         event = MessageEvent(text=routed.body, message_type=MessageType.TEXT, user_id=sender,
                              user_name=message.sender_nick, source=source, raw_message=raw,
                              message_id=message.message_id, reply_to_message_id=message.reply_to_id,
-                             metadata={"xmpp_chat_jid": routing_chat, "xmpp_is_group": message.is_group})
+                             metadata={"xmpp_chat_jid": routing_chat, "xmpp_is_group": message.is_group,
+                                       "xmpp_omemo": message.encrypted})
         await self.handle_message(event)
 
     def _snapshot(self):

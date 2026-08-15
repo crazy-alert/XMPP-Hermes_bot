@@ -40,6 +40,18 @@ def direct_stanza(*, sender="Admin@Example.Com/phone", body="hello", message_id=
     return stanza
 
 
+def omemo_stanza(*, sender="Admin@Example.Com/phone", message_id="omemo-1"):
+    stanza = direct_stanza(sender=sender, body="This message is OMEMO encrypted.", message_id=message_id)
+    ET.SubElement(stanza.xml, "{eu.siacs.conversations.axolotl}encrypted")
+    return stanza
+
+
+def unsupported_encrypted_stanza():
+    stanza = direct_stanza(body="Encrypted message")
+    ET.SubElement(stanza.xml, "{urn:xmpp:omemo:2}encrypted")
+    return stanza
+
+
 def group_stanza(*, sender="private@conference.example.com/Admin", body="hello", message_id="muc-1", delayed=False):
     stanza = Message()
     stanza["type"] = "groupchat"
@@ -63,6 +75,74 @@ def test_direct_message_translates_real_synthetic_stanza_to_model(tmp_path):
     assert received == [
         InboundXmppMessage("dm-1", BOT_BARE, "admin@example.com", "admin", "hello", False, "previous-7")
     ]
+
+
+def test_direct_message_sends_delivery_and_displayed_markers_when_requested(tmp_path):
+    received = []
+    client = make_client(tmp_path, on_message=received.append)
+    sent = capture_outbound(client)
+    stanza = direct_stanza()
+    ET.SubElement(stanza.xml, "{urn:xmpp:receipts}request")
+    ET.SubElement(stanza.xml, "{urn:xmpp:chat-markers:0}markable")
+
+    client._handle_direct_message(stanza)
+
+    assert received == [InboundXmppMessage("dm-1", BOT_BARE, "admin@example.com", "admin", "hello", False, None)]
+    assert [(item["to"], item["receipt"]) for item in sent[:1]] == [("Admin@Example.Com/phone", "dm-1")]
+    assert sent[1]["displayed"]["id"] == "dm-1"
+
+
+def test_encrypted_direct_message_is_decrypted_before_it_reaches_the_adapter(tmp_path):
+    received = []
+    client = make_client(tmp_path, on_message=received.append)
+
+    async def decrypt(stanza):
+        return direct_stanza(body="secret"), object()
+
+    client._omemo_ready = True
+    client._decrypt_omemo = decrypt
+
+    async def scenario():
+        client._handle_direct_message(omemo_stanza())
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+    assert received == [
+        InboundXmppMessage("dm-1", BOT_BARE, "admin@example.com", "admin", "secret", False, None, encrypted=True)
+    ]
+
+
+def test_encrypted_outbound_direct_message_passes_through_omemo_before_send(tmp_path):
+    client = make_client(tmp_path)
+    sent = capture_outbound(client)
+    encrypted_for = []
+
+    async def encrypt(stanza, recipients):
+        encrypted_for.append((stanza["body"], {str(recipient) for recipient in recipients}))
+        stanza["body"] = "This message is OMEMO encrypted."
+        ET.SubElement(stanza.xml, "{eu.siacs.conversations.axolotl}encrypted")
+        return stanza, frozenset()
+
+    client._omemo_ready = True
+    client._encrypt_omemo = encrypt
+
+    ids = asyncio.run(client.send_direct_omemo("admin@example.com", "secret"))
+
+    assert encrypted_for == [("secret", {"admin@example.com"})]
+    assert ids == [sent[0]["id"]]
+    assert sent[0].xml.find("{eu.siacs.conversations.axolotl}encrypted") is not None
+
+
+def test_unsupported_encryption_gets_an_explicit_direct_message_explanation(tmp_path):
+    received = []
+    client = make_client(tmp_path, on_message=received.append)
+    sent = capture_outbound(client)
+
+    client._handle_direct_message(unsupported_encrypted_stanza())
+
+    assert received == []
+    assert "OMEMO 2" in sent[0]["body"]
 
 
 @pytest.mark.parametrize(

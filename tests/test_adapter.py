@@ -166,6 +166,10 @@ class FakeClient:
         self.calls.append(("send_direct", jid, body))
         return list(self.direct_ids)
 
+    async def send_direct_omemo(self, jid, body):
+        self.calls.append(("send_direct_omemo", jid, body))
+        return list(self.direct_ids)
+
     async def send_group(self, jid, body):
         self.calls.append(("send_group", jid, body))
         return list(self.group_ids)
@@ -215,7 +219,11 @@ def test_contract_connect_disconnect_marks_and_uses_verified_client_config():
     assert run(adapter.connect()) is True
     run(adapter.disconnect())
 
-    assert client.calls == [("connect",), ("disconnect",)]
+    assert client.calls == [
+        ("connect",),
+        ("send_direct", ADMIN, adapter_module._WELCOME_TEXT),
+        ("disconnect",),
+    ]
     assert adapter.connected_marks == 1
     assert adapter.disconnected_marks == 1
     assert client.config.bot_jid == BOT
@@ -244,6 +252,18 @@ def test_contract_send_selects_dm_or_muc_and_returns_all_stanza_ids():
         message_id="group-2",
         continuation_message_ids=("group-1",),
     )
+
+
+def test_encrypted_dm_marks_recipient_so_the_following_response_is_encrypted():
+    adapter = make_adapter()
+    client = FakeClient.instances[-1]
+
+    run(adapter._dispatch_message(InboundXmppMessage("encrypted-1", BOT, ADMIN, "Admin", "question", False, None, encrypted=True)))
+    result = run(adapter.send(ADMIN, "answer"))
+
+    assert adapter.events[0].metadata["xmpp_omemo"] is True
+    assert client.calls == [("send_direct_omemo", ADMIN, "answer")]
+    assert result == SendResult(success=True, message_id="direct-1")
 
 
 def test_contract_forbidden_dm_and_muc_never_reach_handle_message():
@@ -554,7 +574,7 @@ def test_dm_and_muc_events_have_exact_hermes_source_and_secret_free_fields():
         "direct", MessageType.TEXT, ADMIN, "Admin", "dm-7", "older"
     )
     assert dm.source == SessionSource(Platform("xmpp"), ADMIN, "Admin", "dm", ADMIN, "Admin", None)
-    assert dm.metadata == {"xmpp_chat_jid": BOT, "xmpp_is_group": False}
+    assert dm.metadata == {"xmpp_chat_jid": BOT, "xmpp_is_group": False, "xmpp_omemo": False}
     assert dm.raw_message == {
         "message_id": "dm-7",
         "chat_jid": BOT,
@@ -566,7 +586,7 @@ def test_dm_and_muc_events_have_exact_hermes_source_and_secret_free_fields():
     assert (muc.text, muc.source.chat_id, muc.source.chat_name, muc.source.chat_type) == (
         "group", ROOM, ROOM, "group"
     )
-    assert muc.metadata == {"xmpp_chat_jid": ROOM, "xmpp_is_group": True}
+    assert muc.metadata == {"xmpp_chat_jid": ROOM, "xmpp_is_group": True, "xmpp_omemo": False}
     assert PASSWORD not in repr((dm.metadata, dm.raw_message, muc.metadata, muc.raw_message))
 
 

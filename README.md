@@ -110,7 +110,7 @@ sudo -u hermes -H env HOME=/var/lib/hermes HERMES_HOME=/var/lib/hermes/.hermes \
   bash /path/to/hermes-agent/scripts/install.sh --skip-setup --skip-browser \
   --dir /var/lib/hermes/.hermes/hermes-agent --hermes-home /var/lib/hermes/.hermes
 sudo -u hermes -H /var/lib/hermes/.hermes/bin/uv pip install \
-  --python /var/lib/hermes/.hermes/hermes-agent/venv/bin/python 'slixmpp>=1.12,<2' pytest
+  --python /var/lib/hermes/.hermes/hermes-agent/venv/bin/python 'slixmpp>=1.12,<2' 'slixmpp-omemo==2.2.0' pytest
 ```
 
 Скопируйте `hermes-xmpp/adapter.py`, `plugin.yaml` и каталог `xmpp_bridge/` в

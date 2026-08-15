@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Awaitable, Callable
 from xml.etree import ElementTree as ET
 
@@ -15,9 +17,13 @@ from .models import InboundXmppMessage, XmppInvite
 from .policy import normalize_bare_jid
 from .state import RoomState
 
+logger = logging.getLogger(__name__)
+
 
 _DELAY_NAMESPACE = "urn:xmpp:delay"
 _REPLY_NAMESPACE = "urn:xmpp:reply:0"
+_RECEIPTS_NAMESPACE = "urn:xmpp:receipts"
+_MARKERS_NAMESPACE = "urn:xmpp:chat-markers:0"
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,8 @@ class XmppClientConfig:
     host: str | None = None
     port: int | None = None
     direct_tls: bool = False
+    omemo_state_path: Path | None = None
+    omemo_enabled: bool = False
 
     def __post_init__(self) -> None:
         normalize_bare_jid(self.bot_jid)
@@ -44,6 +52,14 @@ class XmppClientConfig:
             raise ValueError("XMPP port must be between 1 and 65535")
         if type(self.direct_tls) is not bool:
             raise ValueError("XMPP direct TLS flag must be a boolean")
+        if self.omemo_state_path is not None and not isinstance(self.omemo_state_path, Path):
+            raise ValueError("OMEMO state path must be a path")
+        if type(self.omemo_enabled) is not bool:
+            raise ValueError("OMEMO enabled flag must be a boolean")
+        if type(self.omemo_enabled) is not bool:
+            raise ValueError("OMEMO enabled flag must be a boolean")
+        if type(self.omemo_enabled) is not bool:
+            raise ValueError("OMEMO enabled flag must be a boolean")
 
 
 MessageCallback = Callable[[InboundXmppMessage], object]
@@ -65,14 +81,17 @@ class HermesXmppClient(ClientXMPP):
         self._intentional_disconnect = False
         self._sleep = asyncio.sleep
         self._session_ready: asyncio.Future[None] | None = None
+        self._omemo_tasks: set[asyncio.Task[None]] = set()
+        self._omemo_ready = False
         super().__init__(config.bot_jid, config.password)
 
         # Slixmpp selects direct TLS through stream flags, not connect kwargs.
         self.enable_direct_tls = config.direct_tls
         self.enable_starttls = not config.direct_tls
         self._configure_tls()
-        for plugin in ("xep_0030", "xep_0045", "xep_0085", "xep_0198", "xep_0249", "xep_0461"):
+        for plugin in ("xep_0030", "xep_0045", "xep_0085", "xep_0184", "xep_0198", "xep_0249", "xep_0333", "xep_0461"):
             self.register_plugin(plugin)
+        self.plugin["xep_0184"].auto_ack = False
 
         self.add_event_handler("session_start", self._session_start)
         self.add_event_handler("message", self._handle_direct_message)
@@ -154,6 +173,27 @@ class HermesXmppClient(ClientXMPP):
     async def send_direct(self, jid: str, body: str) -> list[str]:
         return self._send_chunks(normalize_bare_jid(jid), body, "chat")
 
+    async def send_direct_omemo(self, jid: str, body: str) -> list[str]:
+        """Encrypt every direct-message chunk before it leaves this process."""
+        recipient = normalize_bare_jid(jid)
+        if not isinstance(body, str) or not body:
+            return []
+        stanza_ids: list[str] = []
+        for chunk in _split_chunks(body):
+            plaintext = self.make_message(recipient, mbody=chunk, mtype="chat")
+            plaintext["id"] = self.new_id()
+            encrypted, errors = await self._encrypt_omemo(plaintext, {JID(recipient)})
+            if errors:
+                logger.warning("OMEMO encryption completed with %d non-critical error(s)", len(errors))
+            if encrypted is None:
+                logger.error("OMEMO encryption produced no message")
+                return []
+            namespace = "eu.siacs.conversations.axolotl"
+            ET.SubElement(encrypted.xml, "{urn:xmpp:eme:0}encryption", {"namespace": namespace, "name": "OMEMO"})
+            self.send(encrypted)
+            stanza_ids.append(encrypted["id"])
+        return stanza_ids
+
     async def send_group(self, room_jid: str, body: str) -> list[str]:
         return self._send_chunks(normalize_bare_jid(room_jid), body, "groupchat")
 
@@ -165,6 +205,8 @@ class HermesXmppClient(ClientXMPP):
 
     async def _session_start(self, _event: object) -> None:
         try:
+            if self.config.omemo_enabled:
+                self._initialize_omemo()
             self._reconnect_index = 0
             self.send_presence()
             roster = self.get_roster()
@@ -180,8 +222,15 @@ class HermesXmppClient(ClientXMPP):
             if self._session_ready is not None and not self._session_ready.done():
                 self._session_ready.set_result(None)
 
-    def _handle_direct_message(self, stanza: object) -> None:
+    def _handle_direct_message(self, stanza: object, *, _decrypted: bool = False) -> None:
         if not self._is_message(stanza) or stanza["type"] == "groupchat":
+            return
+        unsupported = self._unsupported_encryption(stanza)
+        if unsupported is not None:
+            self._send_unsupported_encryption_reply(stanza, unsupported)
+            return
+        if not _decrypted and self._is_omemo(stanza):
+            self._decrypt_later(stanza, False)
             return
         sender = self._bare_or_none(stanza["from"])
         if sender is None or sender == self._bot_bare:
@@ -192,12 +241,13 @@ class HermesXmppClient(ClientXMPP):
         message_id = stanza["id"]
         if not isinstance(message_id, str) or not message_id:
             return
-        self._emit_message(
-            InboundXmppMessage(message_id, self._bot_bare, sender, JID(stanza["from"]).user or "", body, False, self._reply_id(stanza))
-        )
+        self._deliver_message(stanza, InboundXmppMessage(message_id, self._bot_bare, sender, JID(stanza["from"]).user or "", body, False, self._reply_id(stanza), encrypted=_decrypted))
 
     def _handle_group_message(self, stanza: object) -> None:
         if not self._is_message(stanza) or stanza["type"] != "groupchat" or self._has_delay(stanza):
+            return
+        if self._is_omemo(stanza):
+            logger.warning("Ignoring OMEMO message from a group chat: encrypted group replies are unsupported")
             return
         room = self._bare_or_none(stanza["from"])
         if room is None:
@@ -211,7 +261,7 @@ class HermesXmppClient(ClientXMPP):
         sender = self._muc_sender(stanza)
         if sender is None:
             return
-        self._emit_message(
+        self._deliver_message(stanza,
             InboundXmppMessage(
                 message_id,
                 room,
@@ -303,6 +353,39 @@ class HermesXmppClient(ClientXMPP):
             stanza_ids.append(stanza["id"])
         return stanza_ids
 
+    def _decrypt_later(self, stanza: object, is_group: bool) -> None:
+        task = asyncio.get_event_loop().create_task(self._decrypt_and_deliver(stanza, is_group))
+        self._omemo_tasks.add(task)
+        task.add_done_callback(self._omemo_tasks.discard)
+
+    async def _decrypt_and_deliver(self, stanza: object, is_group: bool) -> None:
+        try:
+            decrypted, _device = await self._decrypt_omemo(stanza)
+        except Exception as exc:
+            logger.warning("Could not decrypt OMEMO message: %s", exc.__class__.__name__)
+            return
+        if is_group:
+            self._handle_group_message(decrypted)
+        else:
+            self._handle_direct_message(decrypted, _decrypted=True)
+
+    def _deliver_message(self, stanza: object, event: InboundXmppMessage) -> None:
+        delivery = self._emit_message(event)
+        if stanza.xml.find(f"{{{_RECEIPTS_NAMESPACE}}}request") is not None:
+            receipt = self.make_message(stanza["from"], mtype="chat")
+            receipt["receipt"] = event.message_id
+            self.send(receipt)
+        if stanza.xml.find(f"{{{_MARKERS_NAMESPACE}}}markable") is not None:
+            if isinstance(delivery, asyncio.Future):
+                delivery.add_done_callback(lambda completed: self._send_displayed_marker(stanza, event.message_id) if not completed.cancelled() and completed.exception() is None else None)
+            else:
+                self._send_displayed_marker(stanza, event.message_id)
+
+    def _send_displayed_marker(self, stanza: object, message_id: str) -> None:
+        displayed = self.make_message(stanza["from"], mtype="chat")
+        displayed["displayed"]["id"] = message_id
+        self.send(displayed)
+
     @property
     def _bot_bare(self) -> str:
         return normalize_bare_jid(self.config.bot_jid)
@@ -321,6 +404,44 @@ class HermesXmppClient(ClientXMPP):
     @staticmethod
     def _has_delay(stanza: object) -> bool:
         return stanza.get_plugin("delay", check=True) is not None or stanza.xml.find(f"{{{_DELAY_NAMESPACE}}}delay") is not None
+
+    def _is_omemo(self, stanza: object) -> bool:
+        return stanza.xml.find("{eu.siacs.conversations.axolotl}encrypted") is not None
+
+    @staticmethod
+    def _unsupported_encryption(stanza: object) -> str | None:
+        if stanza.xml.find("{urn:xmpp:omemo:2}encrypted") is not None:
+            return "OMEMO 2"
+        if stanza.xml.find("{urn:xmpp:openpgp:0}openpgp") is not None or stanza.xml.find("{jabber:x:encrypted}x") is not None:
+            return "OpenPGP"
+        return None
+
+    def _send_unsupported_encryption_reply(self, stanza: object, encryption: str) -> None:
+        sender = self._bare_or_none(stanza["from"])
+        if sender is None or sender == self._bot_bare:
+            return
+        reply = self.make_message(stanza["from"], mtype="chat")
+        reply["body"] = f"I cannot read {encryption} messages. Disable encryption or use legacy OMEMO."
+        self.send(reply)
+
+    def _initialize_omemo(self) -> None:
+        if self._omemo_ready:
+            return
+        from . import omemo
+        state_path = self.config.omemo_state_path or self.config.room_state.path.with_name("omemo.json")
+        self.register_plugin("xep_0380")
+        self.register_plugin("xep_0384", {"json_file_path": str(state_path)}, module=omemo)
+        self._omemo_ready = True
+
+    async def _decrypt_omemo(self, stanza: object):
+        if not self._omemo_ready:
+            raise RuntimeError("OMEMO is not initialized")
+        return await self.plugin["xep_0384"].decrypt_message(stanza)
+
+    async def _encrypt_omemo(self, stanza: object, recipients: set[JID]):
+        if not self._omemo_ready:
+            raise RuntimeError("OMEMO is not initialized")
+        return await self.plugin["xep_0384"].encrypt_message(stanza, recipients)
 
     @staticmethod
     def _reply_id(stanza: object) -> str | None:

@@ -359,7 +359,7 @@ fi
 printf '%s\n' 'Installing XMPP Python dependencies...' >&2
 runuser -u hermes -- env HOME="$HERMES_ACCOUNT_HOME_DISK" HERMES_HOME="$HERMES_HOME_DISK" \
     UV_HTTP_TIMEOUT=30 UV_HTTP_RETRIES=2 \
-    bash -c 'cd "$1" && exec "$2" pip install --python "$3" "slixmpp>=1.12,<2" pytest' \
+    bash -c 'cd "$1" && exec "$2" pip install --python "$3" "slixmpp>=1.12,<2" "slixmpp-omemo==2.2.0" pytest' \
     bash "$HERMES_ACCOUNT_HOME_DISK" "$UV_BIN_DISK" "$HERMES_PYTHON_DISK"
 
 # Stage the complete allowlisted plugin before stopping the service.

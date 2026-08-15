@@ -491,6 +491,12 @@ def test_installer_provisions_and_enables_only_the_reboot_path_helper() -> None:
     assert "apt-get install -y --no-install-recommends python3" in installer
 
 
+def test_installer_installs_the_pinned_omemo_transport_dependency() -> None:
+    installer = read_asset("deploy/install-on-ubuntu.sh")
+
+    assert '"slixmpp-omemo==2.2.0"' in installer
+
+
 def test_env_template_and_unit_contract() -> None:
     values = {}
     comments = []
@@ -564,6 +570,19 @@ def test_bootstrap_prompts_for_docker_before_exactly_seven_xmpp_values(tmp_path:
     ]
     assert (root / "etc/hermes/hermes.env").is_file()
     assert (root / "var/lib/hermes/.hermes/xmpp/admin.json").is_file()
+
+
+def test_bootstrap_writes_parseable_initial_admin_state(tmp_path: Path) -> None:
+    script, root, env = generated_bootstrap(tmp_path)
+
+    result = subprocess.run(
+        [find_bash(), str(script), "--ref", env["TEST_REF"]], cwd=ROOT, env=env,
+        input=bootstrap_input(), text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads((root / "var/lib/hermes/.hermes/xmpp/admin.json").read_text(encoding="utf-8"))
+    assert state["owners"] == ["owner@example.com"]
 
 
 def test_bootstrap_rejects_control_character_jid_without_replacing_existing_generation(tmp_path: Path) -> None:
