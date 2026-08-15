@@ -71,11 +71,16 @@ class HermesRuntimeConfig:
         if not isinstance(model_section, dict):
             raise RuntimeConfigError("Hermes model configuration is invalid")
         providers["xmpp-ai"] = {
-            "api": endpoint,
+            "name": "XMPP AI",
+            "base_url": endpoint,
+            "model": model.strip(),
             "key_env": _TOKEN_ENV_KEY,
-            "transport": "openai_chat",
+            "discover_models": False,
         }
-        model_section["default"] = f"xmpp-ai/{model.strip()}"
+        model_section["provider"] = "xmpp-ai"
+        model_section["default"] = model.strip()
+        model_section["base_url"] = endpoint
+        model_section["key_env"] = _TOKEN_ENV_KEY
         env_contents = self._updated_env_contents(_TOKEN_ENV_KEY, token)
         self._atomic_write(self.config_path, yaml.safe_dump(document, allow_unicode=True, sort_keys=False))
         self._atomic_write(self.env_path, env_contents)

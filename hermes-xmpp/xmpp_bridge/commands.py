@@ -33,9 +33,17 @@ _HELP_TEXT = (
     "/trust list — показать доверенные JID\n"
     "/owner list — показать владельцев\n"
     "/doctor — проверить конфигурацию\n"
-    "/restart — применить конфигурацию перезапуском службы\n\n"
+    "/rebootserver — перезагрузить сервер\n\n"
     "Быстрая настройка AI Tunnel: /setaitunnel, затем /model set <model> и /token set <token>.\n"
     f"AI Tunnel: {AITUNNEL_REFERRAL_URL}"
+)
+
+
+_HERMES_HELP_TEXT = (
+    "\n\nКоманды Hermes:\n"
+    "/new, /reset — начать новый диалог без прежнего контекста\n"
+    "/sethome — назначить этот чат каналом системных уведомлений\n"
+    "/restart — перезапустить текущую сессию Hermes\n"
 )
 
 
@@ -103,7 +111,7 @@ class CommandRouter:
             toggle = self._start_toggle(sender, body, config)
             if toggle.handled:
                 return toggle
-            if body.casefold() == "restart":
+            if body.casefold() == "rebootserver":
                 return CommandResult(False)
             command = body.split(None, 1)[0].casefold() if body else ""
             if command in {"help", "status", "config", "model", "setaitunnel", "endpoint", "token", "image", "trust", "owner", "doctor"}:
@@ -164,7 +172,7 @@ class CommandRouter:
         value = parts[2].strip() if len(parts) > 2 else ""
         try:
             if command == "/help":
-                return CommandResult(True, _HELP_TEXT)
+                return CommandResult(True, _HELP_TEXT + _HERMES_HELP_TEXT)
             if command in {"/status", "/config"}:
                 model = config.model or "не задана"
                 endpoint = config.endpoint or "не задан"
@@ -221,8 +229,10 @@ class CommandRouter:
                 return CommandResult(True, self._require_runtime().image_status())
             if command == "/doctor":
                 return CommandResult(True, self._run_doctor())
-            if command == "/restart":
+            if command == "/rebootserver":
                 return CommandResult(True, "Запрошено применение конфигурации.", RestartGateway())
+            if command == "/sethome":
+                return CommandResult(False)
         except (AdminStateError, ConfigValidationError, RuntimeConfigError, ValueError, OSError):
             return CommandResult(True, "Команда не выполнена.")
         return CommandResult(True, "Неизвестная команда. Используйте /help.")
