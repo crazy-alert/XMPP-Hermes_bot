@@ -128,7 +128,7 @@ preflight_validate_utf8() {
 while :; do
     preflight_read_value 'Сервер XMPP: ' HOST
     preflight_validate_host "$HOST" && break
-    printf '%s\n' 'Некорректное имя сервера. Пример: aversa.run' >&2
+    printf '%s\n' 'Некорректное имя сервера. Пример: example.org' >&2
 done
 while :; do
     preflight_read_value 'Порт XMPP: ' PORT
@@ -139,7 +139,7 @@ TLS_MODE=direct
 while :; do
     preflight_read_value 'Полный JID бота с ресурсом: ' JID
     preflight_validate_full_jid "$JID" && preflight_validate_utf8 "$JID" && break
-    printf '%s\n' 'Некорректный полный JID. Пример: bot@aversa.run/Hermes' >&2
+    printf '%s\n' 'Некорректный полный JID. Пример: bot@example.org/Hermes' >&2
 done
 NICK=${JID#*/}
 printf '%s' 'Пароль XMPP: ' >&2
@@ -156,7 +156,7 @@ done
 while :; do
     preflight_read_value 'Первый владелец (bare JID): ' OWNER
     preflight_validate_bare_jid "$OWNER" && preflight_validate_utf8 "$OWNER" && break
-    printf '%s\n' 'Некорректный bare JID. Пример: user@aversa.run' >&2
+    printf '%s\n' 'Некорректный bare JID. Пример: user@example.org' >&2
 done
 
 printf '%s\n' 'Installing bootstrap dependencies...' >&2
