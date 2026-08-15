@@ -87,6 +87,12 @@ def test_invalid_endpoint_is_rejected(tmp_path, endpoint):
         AdminConfig(frozenset({"owner@example.com"}), frozenset(), None, None, None, False).with_changes(endpoint=endpoint)
 
 
+@pytest.mark.parametrize("endpoint", ["https://provider.example/v1/chat/completions", "https://provider.example/v1/images/generations"])
+def test_concrete_api_route_is_not_an_endpoint(tmp_path, endpoint):
+    with pytest.raises(ConfigValidationError):
+        AdminConfig(frozenset({"owner@example.com"}), frozenset(), None, None, None, False).with_changes(endpoint=endpoint)
+
+
 def test_https_or_loopback_endpoint_is_allowed(tmp_path):
     state = AdminState(tmp_path / "admin.json", OWNER)
 

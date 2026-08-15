@@ -126,8 +126,15 @@ PASSWORD = "super-secret-password"
 
 
 class MemoryAdminState:
-    def __init__(self, owners=frozenset({ADMIN}), trusted=frozenset()):
-        self.config = AdminConfig(frozenset(owners), frozenset(trusted), None, None, None, False)
+    def __init__(self, owners=frozenset({ADMIN}), trusted=frozenset(), *, ai_configured=True):
+        self.config = AdminConfig(
+            frozenset(owners),
+            frozenset(trusted),
+            "test-model" if ai_configured else None,
+            "https://api.example.test/v1" if ai_configured else None,
+            "***test" if ai_configured else None,
+            ai_configured,
+        )
 
     def load(self):
         return self.config
@@ -208,6 +215,27 @@ def make_adapter(**kwargs):
     return adapter_module.XmppPlatformAdapter(PlatformConfig(), client_factory=FakeClient, **kwargs)
 
 
+def test_default_command_router_uses_runtime_configurator_at_hermes_home(monkeypatch):
+    captured = {}
+
+    class Runtime:
+        def __init__(self, home): captured["home"] = home
+
+    class Router:
+        def __init__(self, state, *, runtime):
+            captured["state"] = state
+            captured["runtime"] = runtime
+
+    monkeypatch.setattr(adapter_module, "HermesRuntimeConfig", Runtime)
+    monkeypatch.setattr(adapter_module, "CommandRouter", Router)
+    state = MemoryAdminState()
+    make_adapter(admin_state=state)
+
+    assert captured["home"] == Path(os.environ["HERMES_HOME"])
+    assert captured["state"] is state
+    assert isinstance(captured["runtime"], Runtime)
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -276,6 +304,24 @@ def test_contract_forbidden_dm_and_muc_never_reach_handle_message():
 
     run(scenario())
     assert adapter.events == []
+
+
+def test_authorized_messages_receive_configuration_error_instead_of_being_dropped():
+    state = MemoryAdminState(owners=frozenset({ADMIN}), trusted=frozenset({"trusted@example.com"}), ai_configured=False)
+    adapter = make_adapter(admin_state=state)
+    client = FakeClient.instances[-1]
+
+    async def scenario():
+        await adapter._dispatch_message(InboundXmppMessage("owner-missing-ai", BOT, ADMIN, "Admin", "question", False, None))
+        await adapter._dispatch_message(InboundXmppMessage("trusted-missing-ai", BOT, "trusted@example.com", "Trusted", "question", False, None))
+
+    run(scenario())
+
+    assert adapter.events == []
+    assert client.calls[0][:2] == ("send_direct", ADMIN)
+    assert "/model set" in client.calls[0][2]
+    assert client.calls[1][:2] == ("send_direct", "trusted@example.com")
+    assert "not configured" in client.calls[1][2]
 
 
 def test_dm_command_reply_bypasses_failing_hermes_and_calls_supervisor_after_send():
@@ -367,7 +413,7 @@ def test_live_admin_snapshot_authorizes_next_dm_muc_and_invite_without_static_ov
     router = RecordingRouter(CommandResult(False))
     adapter = make_adapter(admin_state=state, command_router=router)
     client = FakeClient.instances[-1]
-    state.config = AdminConfig(frozenset({ADMIN}), frozenset({"live@example.com"}), None, None, None, False, 1)
+    state.config = AdminConfig(frozenset({ADMIN}), frozenset({"live@example.com"}), "test-model", "https://api.example.test/v1", "***test", True, 1)
 
     async def scenario():
         await adapter._dispatch_message(InboundXmppMessage("live-dm", BOT, "live@example.com", "Live", "question", False, None))

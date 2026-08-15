@@ -63,6 +63,31 @@ def test_owner_commands_change_config_without_token_echo():
     assert (state.config.model, state.config.endpoint, state.secret) == ("model-x", "https://llm.example/v1", "very-secret-token")
 
 
+def test_owner_ai_commands_apply_complete_configuration_to_hermes_runtime():
+    class Runtime:
+        def __init__(self): self.calls = []
+        def apply(self, config, token):
+            self.calls.append((config, token))
+            return bool(config.model and config.endpoint and token)
+
+    state, runtime = State(), Runtime()
+    router = CommandRouter(state, runtime=runtime)
+
+    router.handle(message(body="/model set model-x"))
+    router.handle(message(body="/endpoint set https://llm.example/v1"))
+    router.handle(message(body="/token set very-secret-token"))
+
+    applied, token = runtime.calls[-1]
+    assert (applied.model, applied.endpoint, token) == ("model-x", "https://llm.example/v1", "very-secret-token")
+
+
+def test_endpoint_command_rejects_a_concrete_api_method():
+    state = State()
+    result = CommandRouter(state).handle(message(body="/endpoint set https://llm.example/v1/chat/completions"))
+    assert result.handled is True
+    assert state.config.endpoint is None
+
+
 def test_owner_only_and_muc_never_administers():
     router = CommandRouter(State())
     assert router.handle(message("trusted@example.com", "/model set bad")).handled is False

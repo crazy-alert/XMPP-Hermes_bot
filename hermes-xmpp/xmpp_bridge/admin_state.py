@@ -16,8 +16,7 @@ from pathlib import Path
 import stat
 import threading
 import time
-from urllib.parse import urlparse
-
+from .hermes_config import RuntimeConfigError, validate_api_base_url
 from .policy import normalize_bare_jid
 
 
@@ -235,11 +234,10 @@ def _endpoint(value: object) -> str | None:
     endpoint = _optional_text(value, "endpoint")
     if endpoint is None:
         return None
-    parsed = urlparse(endpoint)
-    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-    if any(char.isspace() for char in endpoint) or not parsed.hostname or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback)):
-        raise ConfigValidationError("endpoint must use HTTPS or loopback HTTP")
-    return endpoint
+    try:
+        return validate_api_base_url(endpoint)
+    except RuntimeConfigError as error:
+        raise ConfigValidationError("invalid endpoint") from error
 
 
 def _mask(token: str | None) -> str | None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import time
 
 from .admin_state import AdminStateError, ConfigValidationError
+from .hermes_config import RuntimeConfigError, validate_api_base_url
 from .models import InboundXmppMessage
 from .policy import normalize_bare_jid
 
@@ -43,10 +44,11 @@ class _StaleToggle(Exception):
 
 
 class CommandRouter:
-    def __init__(self, state, *, monotonic=time.monotonic, doctor=None) -> None:
+    def __init__(self, state, *, monotonic=time.monotonic, doctor=None, runtime=None) -> None:
         self.state = state
         self._clock = monotonic
         self._doctor = doctor
+        self._runtime = runtime
         self._pending: dict[str, _PendingToggle] = {}
 
     def handle(self, message: InboundXmppMessage) -> CommandResult:
@@ -164,21 +166,25 @@ class CommandRouter:
                 return CommandResult(True, "Owner обновлён.")
             if command == "/model" and subcommand == "set":
                 self._bounded(value, MAX_MODEL_LENGTH)
-                self.state.mutate(lambda current: current.with_changes(model=value))
+                updated = self.state.mutate(lambda current: current.with_changes(model=value))
+                self._apply_runtime(updated)
                 return CommandResult(True, "Модель обновлена.")
             if command == "/endpoint" and subcommand == "set":
                 self._bounded(value, MAX_ENDPOINT_LENGTH)
-                self.state.mutate(lambda current: current.with_changes(endpoint=value))
+                endpoint = validate_api_base_url(value)
+                updated = self.state.mutate(lambda current: current.with_changes(endpoint=endpoint))
+                self._apply_runtime(updated)
                 return CommandResult(True, "Endpoint обновлён.")
             if command == "/token" and subcommand == "set":
                 self._bounded(value, MAX_INPUT_LENGTH)
                 updated = self.state.set_token(value)
+                self._apply_runtime(updated, value)
                 return CommandResult(True, f"Токен сохранён: {updated.token_mask}")
             if command == "/doctor":
                 return CommandResult(True, self._run_doctor())
             if command == "/restart":
                 return CommandResult(True, "Запрошено применение конфигурации.", RestartGateway())
-        except (AdminStateError, ConfigValidationError, ValueError, OSError):
+        except (AdminStateError, ConfigValidationError, RuntimeConfigError, ValueError, OSError):
             return CommandResult(True, "Команда не выполнена.")
         return CommandResult(True, "Неизвестная команда. Используйте /help.")
 
@@ -186,6 +192,14 @@ class CommandRouter:
     def _bounded(value: str, maximum: int) -> None:
         if not value or len(value) > maximum:
             raise ValueError("invalid command value")
+
+    def _apply_runtime(self, config, token=None) -> None:
+        if self._runtime is None:
+            return
+        if token is None:
+            getter = getattr(self.state, "token", None)
+            token = getter() if callable(getter) else None
+        self._runtime.apply(config, token)
 
     def _run_doctor(self) -> str:
         if self._doctor is None:

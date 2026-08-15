@@ -14,6 +14,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 try:
     from .xmpp_bridge.admin_state import AdminState, AdminStateError, ConfigValidationError
+    from .xmpp_bridge.hermes_config import HermesRuntimeConfig
     from .xmpp_bridge.client import HermesXmppClient, XmppClientConfig
     from .xmpp_bridge.commands import CommandRouter, RestartGateway
     from .xmpp_bridge.models import InboundXmppMessage, XmppInvite
@@ -21,6 +22,7 @@ try:
     from .xmpp_bridge.state import RoomState
 except ImportError:  # Direct module import used by focused adapter tests.
     from xmpp_bridge.admin_state import AdminState, AdminStateError, ConfigValidationError
+    from xmpp_bridge.hermes_config import HermesRuntimeConfig
     from xmpp_bridge.client import HermesXmppClient, XmppClientConfig
     from xmpp_bridge.commands import CommandRouter, RestartGateway
     from xmpp_bridge.models import InboundXmppMessage, XmppInvite
@@ -126,7 +128,10 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         self._seed_admin_state = admin_state is None and not admin_path.exists()
         first_owner = sorted(self.allowed_users)[0]
         self.admin_state = admin_state or AdminState(admin_path, first_owner)
-        self.command_router = command_router or CommandRouter(self.admin_state)
+        self.command_router = command_router or CommandRouter(
+            self.admin_state,
+            runtime=HermesRuntimeConfig(Path(os.getenv("HERMES_HOME", "~/.hermes")).expanduser()),
+        )
         self._supervisor = supervisor
         self._inbound = _TtlCache(600, cache_capacity, monotonic)
         self._outbound = _TtlCache(86400, cache_capacity, monotonic)
@@ -228,7 +233,8 @@ class XmppPlatformAdapter(BasePlatformAdapter):
                     await self._emit_control(control_event)
                 return
         try:
-            allowed_users = snapshot_allowlist(self._snapshot())
+            snapshot = self._snapshot()
+            allowed_users = snapshot_allowlist(snapshot)
         except (AdminStateError, ConfigValidationError, OSError, ValueError):
             return
         room_nick = message.room_nick or self.nick
@@ -239,6 +245,14 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         self._inbound.add(key)
         sender = normalize_bare_jid(message.sender_jid)
         event_chat = chat if message.is_group else sender
+        if not (snapshot.model and snapshot.endpoint and snapshot.token_present):
+            reply = (
+                "AI is not configured. Use /model set <model>, /endpoint set <url>, and /token set <token>."
+                if sender in snapshot.owners
+                else "AI is not configured. Please contact the bot owner."
+            )
+            await self.send(event_chat, reply)
+            return
         source = self.build_source(chat_id=event_chat, chat_name=chat if message.is_group else message.sender_nick,
                                    chat_type="group" if message.is_group else "dm", user_id=sender,
                                    user_name=message.sender_nick, thread_id=None)
