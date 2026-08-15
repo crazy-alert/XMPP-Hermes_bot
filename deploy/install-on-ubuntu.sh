@@ -210,7 +210,7 @@ runuser -u hermes -- sh -c '
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends python3
-apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev
+apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libffi-dev ripgrep ffmpeg
 
 reject_unsafe_existing_dir "$HERMES_ACCOUNT_HOME_DISK"
 if [ "$(stat -c %U:%G:%a "$HERMES_ACCOUNT_HOME_DISK")" != root:root:755 ]; then

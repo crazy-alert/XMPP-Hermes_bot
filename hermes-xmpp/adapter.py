@@ -291,8 +291,7 @@ class XmppPlatformAdapter(BasePlatformAdapter):
         raw = {"message_id": message.message_id, "chat_jid": routing_chat, "sender_jid": sender,
                "sender_nick": message.sender_nick, "is_group": message.is_group,
                "reply_to_id": message.reply_to_id}
-        event = MessageEvent(text=routed.body, message_type=MessageType.TEXT, user_id=sender,
-                             user_name=message.sender_nick, source=source, raw_message=raw,
+        event = MessageEvent(text=routed.body, message_type=MessageType.TEXT, source=source, raw_message=raw,
                              message_id=message.message_id, reply_to_message_id=message.reply_to_id,
                              metadata={"xmpp_chat_jid": routing_chat, "xmpp_is_group": message.is_group,
                                        "xmpp_omemo": message.encrypted})
